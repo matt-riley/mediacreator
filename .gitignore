@@ -6,3 +6,6 @@
 # Local environment
 .env
 .env.*
+
+# Test coverage
+coverage.out

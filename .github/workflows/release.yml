@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   release-please:
-    uses: matt-riley/matt-riley-ci/.github/workflows/release-please.yml@4ff76b1 # v3.0.1
+    uses: matt-riley/matt-riley-ci/.github/workflows/release-please.yml@4ff76b1a606b1fbba163119a65bf7b05f91ab9b6 # v3.0.1
     with:
       config-file: release-please-config.json
       manifest-file: .release-please-manifest.json
@@ -28,7 +28,7 @@ jobs:
   goreleaser:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
-    uses: matt-riley/matt-riley-ci/.github/workflows/go-goreleaser.yml@4ff76b1 # v3.0.1
+    uses: matt-riley/matt-riley-ci/.github/workflows/go-goreleaser.yml@4ff76b1a606b1fbba163119a65bf7b05f91ab9b6 # v3.0.1
     with:
       go-version-file: go.mod
       working-directory: .
