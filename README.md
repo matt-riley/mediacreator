@@ -230,10 +230,17 @@ also publishes the Homebrew formula to
 
 Repository secrets required:
 
-- `HOMEBREW_TAP_GITHUB_TOKEN` — classic PAT with `repo` scope to push the
-  formula to the tap (fine-grained tokens cannot push to other repos).
+- `PRIVATE_KEY` (secret) + `APP_ID` (variable) — the GitHub App private key
+  and app id used to mint a short-lived token for the Homebrew tap push. This
+  is the same GitHub App managed by the [infra repo](https://github.com/matt-riley/infra)
+  (bootstrap sets `APP_ID`; the private key lives in repo secrets). The app
+  must be installed on `matt-riley/homebrew-tools` with `contents: write`.
 - `RELEASE_PLEASE_TOKEN` (optional) — PAT used to create the release tag and
   trigger the publish; falls back to the default `GITHUB_TOKEN`.
+- `HOMEBREW_TAP_GITHUB_TOKEN` (optional, legacy) — classic PAT with `repo`
+  scope; only used as a fallback if the GitHub App token is unavailable. If
+  neither is available the Homebrew publish is skipped (set
+  `tap-fail-if-missing-token: true` on the workflow call to fail instead).
 
 Local validation before pushing a release:
 
