@@ -54,6 +54,33 @@ type falProvider struct {
 
 func (p *falProvider) Name() string { return "fal" }
 
+// NormalizeInput maps the provider-agnostic StandardInput onto fal's native
+// request schema. Single images use "image_url", multiple use "image_urls"
+// (the convention across fal image/video models); image models use "prompt"
+// while some audio models expect "text" — pass those via --input.
+func (p *falProvider) NormalizeInput(model string, std StandardInput) map[string]any {
+	in := map[string]any{}
+	if std.Prompt != "" {
+		in["prompt"] = std.Prompt
+	}
+	switch len(std.ImageURLs) {
+	case 1:
+		in["image_url"] = std.ImageURLs[0]
+	case 2, 3, 4, 5, 6, 7, 8, 9, 10:
+		in["image_urls"] = std.ImageURLs
+	}
+	if std.AspectRatio != "" {
+		in["aspect_ratio"] = std.AspectRatio
+	}
+	if std.Duration != "" {
+		in["duration"] = std.Duration
+	}
+	if std.HasSeed {
+		in["seed"] = std.Seed
+	}
+	return in
+}
+
 func (p *falProvider) Submit(ctx context.Context, model string, input map[string]any, webhook string) (*Job, error) {
 	if model == "" {
 		return nil, fmt.Errorf("provider fal requires --model (e.g. fal-ai/flux/dev)")

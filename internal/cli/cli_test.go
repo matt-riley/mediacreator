@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -429,5 +430,130 @@ func TestListNoKeyRequired(t *testing.T) {
 	t.Setenv("FAL_CATALOG_URL", srv.URL)
 	if err := runList([]string{"--provider", "fal", "--plain"}); err != nil {
 		t.Fatalf("list without key failed: %v", err)
+	}
+}
+
+// TestStandardInputAcrossProviders verifies that identical standard flags are
+// translated into each provider's native schema and that the completion JSON
+// is the same shape regardless of provider.
+func TestStandardInputAcrossProviders(t *testing.T) {
+	mediaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("img"))
+	}))
+	defer mediaSrv.Close()
+
+	var falBody, kieBody string
+	falSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			b, _ := io.ReadAll(r.Body)
+			falBody = string(b)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"request_id":   "req-s",
+				"response_url": "http://" + r.Host + "/m/requests/req-s",
+				"status_url":   "http://" + r.Host + "/m/requests/req-s/status"})
+			return
+		}
+		switch r.URL.Path {
+		case "/m/requests/req-s/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "COMPLETED"})
+		case "/m/requests/req-s":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"images": []any{map[string]any{"url": mediaSrv.URL + "/a.png"}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer falSrv.Close()
+
+	kieSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			b, _ := io.ReadAll(r.Body)
+			kieBody = string(b)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 200, "msg": "success",
+				"data": map[string]any{"taskId": "task-s"},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 200, "msg": "success",
+			"data": map[string]any{
+				"taskId": "task-s", "state": "success",
+				"resultJson": `{"resultUrls":["` + mediaSrv.URL + `/b.png"]}`,
+			},
+		})
+	}))
+	defer kieSrv.Close()
+
+	t.Setenv("FAL_KEY", "k")
+	t.Setenv("FAL_BASE_URL", falSrv.URL)
+	t.Setenv("KIE_API_KEY", "k")
+	t.Setenv("KIE_BASE_URL", kieSrv.URL)
+
+	args := []string{
+		"--prompt", "a red fox in the snow",
+		"--image-url", "https://x/ref.png",
+		"--aspect-ratio", "16:9",
+		"--duration", "5",
+		"--seed", "42",
+		"--output", t.TempDir() + "/",
+		"--interval", "1s",
+	}
+
+	var falOut, kieOut string
+	falOut = captureStdout(t, func() {
+		if err := runGenerate(append([]string{"--provider", "fal", "--model", "fal-ai/flux/dev/image-to-image"}, args...)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	kieOut = captureStdout(t, func() {
+		if err := runGenerate(append([]string{"--provider", "kie", "--model", "bytedance/seedream"}, args...)); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// Same prompt reached both providers with the standard params.
+	var falReq map[string]any
+	if err := json.Unmarshal([]byte(falBody), &falReq); err != nil {
+		t.Fatalf("fal body: %v", err)
+	}
+	if falReq["prompt"] != "a red fox in the snow" || falReq["image_url"] != "https://x/ref.png" {
+		t.Fatalf("fal request = %v", falReq)
+	}
+	var kieReq struct {
+		Model string         `json:"model"`
+		Input map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal([]byte(kieBody), &kieReq); err != nil {
+		t.Fatalf("kie body: %v", err)
+	}
+	if kieReq.Input["prompt"] != "a red fox in the snow" || kieReq.Input["image_url"] != "https://x/ref.png" {
+		t.Fatalf("kie request = %v", kieReq)
+	}
+
+	falDone := mustJSON(t, splitLines(falOut)[1])
+	kieDone := mustJSON(t, splitLines(kieOut)[1])
+
+	// Canonical shape: same keys on both providers, no raw provider payload.
+	if len(falDone) != len(kieDone) {
+		t.Fatalf("shape mismatch:\nfal: %v\nkie: %v", falDone, kieDone)
+	}
+	for k := range falDone {
+		if _, ok := kieDone[k]; !ok {
+			t.Fatalf("key %q missing from kie output", k)
+		}
+	}
+	if _, ok := falDone["result"]; ok {
+		t.Fatal("raw result must not appear in canonical output")
+	}
+	mediaArr := falDone["media"].([]any)
+	item := mediaArr[0].(map[string]any)
+	if item["type"] != "image" || item["path"] == "" {
+		t.Fatalf("media item = %v", item)
+	}
+	if !reflect.DeepEqual(falDone["images"], []any{item["url"]}) {
+		t.Fatalf("images = %v", falDone["images"])
 	}
 }

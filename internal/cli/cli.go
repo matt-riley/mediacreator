@@ -40,15 +40,19 @@ Commands:
 Common flags:
   --provider string   fal | kie                       (default "fal")
   --model string      model / endpoint id, e.g. fal-ai/flux/dev, bytedance/seedream, veo3
-  --input string      input parameters as a JSON object
-  --prompt string     shorthand for --input '{"prompt": "<text>"}'
+  --input string      native input parameters as JSON (merged over standard flags)
+  --prompt string     generation prompt — the same flag works on every provider
+  --image-url string  input image URL (repeatable; mapped to image_url/imageUrls per provider)
+  --aspect-ratio str  aspect ratio, e.g. 16:9
+  --duration string   duration in seconds, e.g. 5
+  --seed int          random seed
   --output string     destination file or directory   (default ".")
   --webhook string    optional completion webhook URL
   --request-id string id returned by submit (fal: request_id, kie: taskId)
   --timeout duration  max time to wait for completion (default 10m)
   --interval duration poll interval                  (default 5s)
   --kie-mode string   market | model | auto           (default "auto", kie only)
-  --verbose           log progress to stderr
+  --verbose           log progress and raw payloads to stderr
 
 Environment:
   FAL_KEY      fal.ai API key (https://fal.ai/dashboard/keys)
@@ -78,6 +82,11 @@ type options struct {
 	model     string
 	input     string
 	prompt    string
+	imageURLs []string
+	aspect    string
+	duration  string
+	seed      int64
+	hasSeed   bool
 	output    string
 	webhook   string
 	requestID string
@@ -129,8 +138,12 @@ func newFlagSet(name string) (*flag.FlagSet, *options) {
 	o := &options{}
 	fs.StringVar(&o.provider, "provider", os.Getenv("MC_PROVIDER"), "fal | kie")
 	fs.StringVar(&o.model, "model", "", "model / endpoint id")
-	fs.StringVar(&o.input, "input", "", "input parameters as JSON")
-	fs.StringVar(&o.prompt, "prompt", "", "shorthand for --input {\"prompt\":...}")
+	fs.StringVar(&o.input, "input", "", "native input parameters as JSON (merged over the standard flags)")
+	fs.StringVar(&o.prompt, "prompt", "", "generation prompt (standard input, any provider)")
+	fs.Var((*stringSlice)(&o.imageURLs), "image-url", "input image URL (repeatable; any provider)")
+	fs.StringVar(&o.aspect, "aspect-ratio", "", "aspect ratio, e.g. 16:9 (standard input)")
+	fs.StringVar(&o.duration, "duration", "", "duration in seconds, e.g. 5 (standard input)")
+	fs.Int64Var(&o.seed, "seed", 0, "random seed (standard input)")
 	fs.StringVar(&o.output, "output", ".", "destination file or directory")
 	fs.StringVar(&o.webhook, "webhook", "", "completion webhook URL")
 	fs.StringVar(&o.requestID, "request-id", "", "job id returned by submit")
@@ -153,29 +166,42 @@ func buildProvider(o *options) (provider.Provider, error) {
 	}
 }
 
-// buildInput merges --prompt and --input into a single parameter object.
-func buildInput(o *options) (map[string]any, error) {
-	var input map[string]any
+// stringSlice is a repeatable string flag.
+type stringSlice []string
+
+func (s *stringSlice) String() string { return strings.Join(*s, ",") }
+func (s *stringSlice) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
+// buildNativeInput translates the standard flags into the provider's native
+// request body, then merges the raw --input JSON on top (it wins on conflict).
+func buildNativeInput(p provider.Provider, o *options) (map[string]any, error) {
+	std := provider.StandardInput{
+		Prompt:      o.prompt,
+		ImageURLs:   o.imageURLs,
+		AspectRatio: o.aspect,
+		Duration:    o.duration,
+		Seed:        o.seed,
+		HasSeed:     o.hasSeed,
+	}
+	native := map[string]any{}
+	if n, ok := p.(provider.InputNormalizer); ok {
+		native = n.NormalizeInput(o.model, std)
+	}
 	if o.input != "" {
+		var extra map[string]any
 		dec := json.NewDecoder(strings.NewReader(o.input))
 		dec.UseNumber()
-		if err := dec.Decode(&input); err != nil {
+		if err := dec.Decode(&extra); err != nil {
 			return nil, fmt.Errorf("invalid --input JSON: %w", err)
 		}
-		if input == nil {
-			input = map[string]any{}
+		for k, v := range extra {
+			native[k] = v
 		}
 	}
-	if o.prompt != "" {
-		if input == nil {
-			input = map[string]any{}
-		}
-		input["prompt"] = o.prompt
-	}
-	if input == nil {
-		input = map[string]any{}
-	}
-	return input, nil
+	return native, nil
 }
 
 // printJSON writes v as a single JSON object line to stdout.
@@ -197,6 +223,7 @@ func runGenerate(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	o.hasSeed = flagWasSet(fs, "seed")
 	if o.model == "" {
 		return fmt.Errorf("--model is required")
 	}
@@ -204,7 +231,7 @@ func runGenerate(args []string) error {
 	if err != nil {
 		return err
 	}
-	input, err := buildInput(o)
+	input, err := buildNativeInput(p, o)
 	if err != nil {
 		return err
 	}
@@ -229,6 +256,7 @@ func runSubmit(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	o.hasSeed = flagWasSet(fs, "seed")
 	if o.model == "" {
 		return fmt.Errorf("--model is required")
 	}
@@ -236,7 +264,7 @@ func runSubmit(args []string) error {
 	if err != nil {
 		return err
 	}
-	input, err := buildInput(o)
+	input, err := buildNativeInput(p, o)
 	if err != nil {
 		return err
 	}
@@ -246,6 +274,17 @@ func runSubmit(args []string) error {
 	}
 	emitSubmit(p, o, job)
 	return nil
+}
+
+// flagWasSet reports whether the named flag was explicitly provided.
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
 }
 
 // runList prints the model catalog of a provider.
@@ -375,13 +414,16 @@ func runStatus(args []string) error {
 	if err != nil {
 		return err
 	}
+	if o.verbose {
+		raw, _ := json.Marshal(st.Raw)
+		fmt.Fprintf(os.Stderr, "raw status: %s\n", raw)
+	}
 	return printJSON(map[string]any{
 		"provider":   p.Name(),
 		"model":      o.model,
 		"request_id": o.requestID,
 		"status":     st.Phase,
 		"detail":     st.Detail,
-		"data":       st.Raw,
 	})
 }
 
@@ -460,15 +502,21 @@ func emitSubmit(p provider.Provider, o *options, job *provider.Job) {
 	_ = printJSON(info)
 }
 
-// emitDone downloads the media and prints the completion line.
+// emitDone downloads the media and prints the completion line. The output
+// shape is identical regardless of provider: media is normalized to a list of
+// {url, path, size, type} plus per-kind URL arrays.
 func emitDone(p provider.Provider, o *options, job *provider.Job, result map[string]any) error {
-	urls := media.ExtractURLs(result)
-	if len(urls) == 0 {
+	found := media.ExtractMedia(result)
+	if len(found) == 0 {
 		raw, _ := json.Marshal(result)
 		return fmt.Errorf("no media URLs found in the result; raw result:\n%s", raw)
 	}
-	logf(o, "found %d media file(s)", len(urls))
+	logf(o, "found %d media file(s)", len(found))
 
+	urls := make([]string, len(found))
+	for i, m := range found {
+		urls[i] = m.URL
+	}
 	paths, err := planOutputs(o.output, urls)
 	if err != nil {
 		return err
@@ -477,25 +525,52 @@ func emitDone(p provider.Provider, o *options, job *provider.Job, result map[str
 		URL  string `json:"url"`
 		Path string `json:"path"`
 		Size int64  `json:"size"`
+		Type string `json:"type"`
 	}
-	files := make([]fileInfo, 0, len(urls))
-	for i, u := range urls {
-		logf(o, "downloading %s -> %s", u, paths[i])
-		size, err := media.Download(context.Background(), u, paths[i])
+	files := make([]fileInfo, 0, len(found))
+	var images, videos, audios []string
+	for i, m := range found {
+		logf(o, "downloading %s -> %s", m.URL, paths[i])
+		size, err := media.Download(context.Background(), m.URL, paths[i])
 		if err != nil {
-			return fmt.Errorf("downloading %s: %w", u, err)
+			return fmt.Errorf("downloading %s: %w", m.URL, err)
 		}
-		files = append(files, fileInfo{URL: u, Path: paths[i], Size: size})
+		kind := m.Kind
+		if kind == media.KindOther {
+			kind = media.KindByExt(paths[i])
+		}
+		files = append(files, fileInfo{URL: m.URL, Path: paths[i], Size: size, Type: string(kind)})
+		switch kind {
+		case media.KindImage:
+			images = append(images, m.URL)
+		case media.KindVideo:
+			videos = append(videos, m.URL)
+		case media.KindAudio:
+			audios = append(audios, m.URL)
+		}
+	}
+	if o.verbose {
+		raw, _ := json.Marshal(result)
+		fmt.Fprintf(os.Stderr, "raw result: %s\n", raw)
 	}
 
-	return printJSON(map[string]any{
+	out := map[string]any{
 		"provider":   p.Name(),
 		"model":      o.model,
 		"request_id": job.ID,
 		"status":     "completed",
 		"media":      files,
-		"result":     result,
-	})
+	}
+	if len(images) > 0 {
+		out["images"] = images
+	}
+	if len(videos) > 0 {
+		out["videos"] = videos
+	}
+	if len(audios) > 0 {
+		out["audios"] = audios
+	}
+	return printJSON(out)
 }
 
 // planOutputs maps each media URL to a destination path.

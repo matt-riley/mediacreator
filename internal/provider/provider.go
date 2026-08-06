@@ -44,6 +44,24 @@ type Provider interface {
 	List(ctx context.Context, opts ListOptions) (*ModelList, error)
 }
 
+// StandardInput is the provider-agnostic input for media generation. Providers
+// that implement InputNormalizer translate it into their native request
+// schema, so the same flags work regardless of provider.
+type StandardInput struct {
+	Prompt      string
+	ImageURLs   []string
+	AspectRatio string
+	Duration    string
+	Seed        int64
+	HasSeed     bool
+}
+
+// InputNormalizer is implemented by providers that translate StandardInput
+// into their native request body.
+type InputNormalizer interface {
+	NormalizeInput(model string, std StandardInput) map[string]any
+}
+
 // Model describes a model in a provider's catalog.
 type Model struct {
 	ID         string `json:"id"`

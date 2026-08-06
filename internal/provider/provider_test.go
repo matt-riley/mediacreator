@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -556,5 +557,60 @@ func TestDoJSONRetriesOn429(t *testing.T) {
 	}
 	if m["ok"] != true || calls.Load() != 3 {
 		t.Fatalf("calls = %d, result = %v", calls.Load(), m)
+	}
+}
+
+func TestFalNormalizeInput(t *testing.T) {
+	p := NewFalList().(*falProvider) // keyless provider is fine for normalization
+	std := StandardInput{
+		Prompt:      "a fox",
+		ImageURLs:   []string{"https://x/ref.png"},
+		AspectRatio: "16:9",
+		Duration:    "5",
+		Seed:        42,
+		HasSeed:     true,
+	}
+	in := p.NormalizeInput("fal-ai/kling-video/v1/text-to-video", std)
+	want := map[string]any{
+		"prompt":       "a fox",
+		"image_url":    "https://x/ref.png",
+		"aspect_ratio": "16:9",
+		"duration":     "5",
+		"seed":         int64(42),
+	}
+	if !reflect.DeepEqual(in, want) {
+		t.Fatalf("normalized = %v want %v", in, want)
+	}
+
+	// Multiple images switch to image_urls.
+	in = p.NormalizeInput("x", StandardInput{ImageURLs: []string{"a", "b"}})
+	if got := in["image_urls"]; !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Fatalf("image_urls = %v", got)
+	}
+	if _, ok := in["image_url"]; ok {
+		t.Fatal("image_url should be absent with multiple images")
+	}
+
+	// Unset seed is omitted.
+	in = p.NormalizeInput("x", StandardInput{Prompt: "p"})
+	if _, ok := in["seed"]; ok {
+		t.Fatal("seed should be omitted when not set")
+	}
+}
+
+func TestKieNormalizeInput(t *testing.T) {
+	p := NewKieList().(*kieProvider)
+	std := StandardInput{Prompt: "a fox", ImageURLs: []string{"https://x/ref.png"}}
+
+	// Market mode: canonical keys.
+	market := p.NormalizeInput("bytedance/seedream", std)
+	if !reflect.DeepEqual(market["image_url"], "https://x/ref.png") {
+		t.Fatalf("market image_url = %v", market)
+	}
+
+	// Family mode (veo): imageUrls array.
+	family := p.NormalizeInput("veo3", std)
+	if !reflect.DeepEqual(family["imageUrls"], []string{"https://x/ref.png"}) {
+		t.Fatalf("family imageUrls = %v", family)
 	}
 }

@@ -39,22 +39,21 @@ for proxies). `MC_PROVIDER` sets a default `--provider`.
 
 ## Quickstart
 
+Input is standardized: the **same flags and prompt work on every provider**.
+The two examples below are identical apart from `--provider`/`--model`:
+
 ```sh
-# Image via fal.ai (saved to a single file)
+# Same prompt, same standard flags — image via fal.ai or kie.ai
 ./mediacreator generate --provider fal --model fal-ai/flux/dev \
     --prompt "a red fox in the snow" --output ./fox.png
-
-# Video via fal.ai (saved into a directory)
-./mediacreator generate --provider fal --model fal-ai/kling-video/v1/standard/text-to-video \
-    --input '{"prompt":"waves crashing on rocks","duration":"5"}' --output ./clips/
-
-# Image via kie.ai market (any model listed on https://kie.ai/market)
 ./mediacreator generate --provider kie --model bytedance/seedream \
-    --prompt "flat vector poster of a mountain campsite" --output ./poster.png
+    --prompt "a red fox in the snow" --output ./fox.png
 
-# Video via kie.ai veo (model-family endpoint used automatically)
+# Same prompt — video via fal.ai or kie.ai (model-family endpoint auto-selected)
+./mediacreator generate --provider fal --model fal-ai/kling-video/v1/standard/text-to-video \
+    --prompt "waves crashing on rocks" --output ./clips/
 ./mediacreator generate --provider kie --model veo3 \
-    --prompt "a dog playing in a park" --output ./clip.mp4
+    --prompt "waves crashing on rocks" --output ./clips/
 
 # Discover available models (no API key required)
 ./mediacreator list --provider fal --search flux --category text-to-image
@@ -88,15 +87,25 @@ for proxies). `MC_PROVIDER` sets a default `--provider`.
 | ---------------- | --------------------------------------------------------------- | ------- |
 | `--provider`     | `fal` or `kie`                                                  | `fal`   |
 | `--model`        | Model/endpoint id (e.g. `fal-ai/flux/dev`, `bytedance/seedream`, `veo3`) | – |
-| `--input`        | Input parameters as a JSON object                               | –       |
-| `--prompt`       | Shorthand for `--input '{"prompt":"..."}'`                      | –       |
+| `--prompt`       | Generation prompt — the same standard flag on every provider    | –       |
+| `--image-url`    | Input image URL (repeatable; mapped to `image_url`/`imageUrls` per provider) | – |
+| `--aspect-ratio` | Aspect ratio, e.g. `16:9` (standard flag, passed through)       | –       |
+| `--duration`     | Duration in seconds, e.g. `5` (standard flag, passed through)   | –       |
+| `--seed`         | Random seed (standard flag)                                     | –       |
+| `--input`        | Native input params as JSON; merged over the standard flags     | –       |
 | `--output`       | Destination file or directory                                   | `.`     |
 | `--webhook`      | Optional completion webhook URL                                 | –       |
 | `--request-id`   | Job id from `submit` (`request_id` on fal, `taskId` on kie)     | –       |
 | `--timeout`      | Max time to wait for completion                                 | `10m`   |
 | `--interval`     | Poll interval                                                   | `5s`    |
 | `--kie-mode`     | `market`, `model`, or `auto` (kie only)                         | `auto`  |
-| `--verbose`      | Print progress to stderr                                        | `false` |
+| `--verbose`      | Print progress and raw provider payloads to stderr              | `false` |
+
+The standard flags (`--prompt`, `--image-url`, `--aspect-ratio`, `--duration`,
+`--seed`) are translated per provider — e.g. a single `--image-url` becomes
+fal's `image_url` and kie market's `image_url`, while kie family endpoints
+(veo, runway, ...) receive `imageUrls`. Use `--input` for model-specific
+parameters; it is merged over the standard flags.
 
 ### `list` flags
 
@@ -115,15 +124,22 @@ for proxies). `MC_PROVIDER` sets a default `--provider`.
 
 ## Output conventions
 
-- **stdout** carries JSON only. `generate` emits two lines: the submit
-  confirmation, then the completion object:
+- **stdout** carries JSON only, and the shape is identical regardless of
+  provider. `generate` emits two lines: the submit confirmation, then the
+  completion object:
 
   ```json
   {"provider":"fal","model":"fal-ai/flux/dev","request_id":"req-abc","status":"submitted","status_url":"...","result_url":"..."}
-  {"provider":"fal","model":"fal-ai/flux/dev","request_id":"req-abc","status":"completed","media":[{"url":"https://...","path":"/abs/fox.png","size":112358}],"result":{...}}
+  {"provider":"kie","model":"bytedance/seedream","request_id":"task-s","status":"completed","media":[{"url":"https://...","path":"/abs/fox.png","size":112358,"type":"image"}],"images":["https://..."]}
   ```
 
-- **stderr** carries diagnostics (only with `--verbose`).
+  The completion object is normalized: `media[]` lists every generated file
+  with `url`, `path`, `size`, and a `type` of `image`, `video`, or `audio`,
+  plus per-kind arrays (`images`, `videos`, `audios`). The raw provider
+  payload is provider-specific, so it is only shown on stderr with
+  `--verbose`.
+
+- **stderr** carries diagnostics and raw payloads (only with `--verbose`).
 - Exit code `0` on success, `1` on error (including failed or timed-out jobs).
 - `--output` rules:
   - ends in `/` or is an existing directory → media saved inside it, named
@@ -165,6 +181,32 @@ go generate ./...                 # regenerates internal/provider/kie_catalog.go
 # or
 KIE_BASE_URL=https://api.kie.ai go run ./cmd/gen-kie-catalog
 ```
+
+## Result shapes
+
+Providers and models do **not** return the same shaped data — this is by
+design; the tool normalizes everything into the canonical output above.
+Verified against the fal.ai and kie.ai documentation:
+
+- **fal.ai** (via the catalog's `expand=openapi-3.0` schemas): image models
+  return `images: [{url, ...}]`, video models `video: {url, ...}`, audio
+  models `audio: {url, ...}`; inputs also differ (`prompt` for image/video,
+  `text` for some TTS models, `image_url` vs `image_urls` for reference
+  images).
+- **kie.ai market** (`jobs/recordInfo`) is unified: `state` + `resultJson`
+  (a string) containing `resultUrls: [...]` — plus `firstFrameUrl` /
+  `lastFrameUrl` for Seedance and `resultObject` for text/mask outputs.
+- **kie.ai model families** each return their own keys: veo
+  `response.resultUrls/originUrls/fullResultUrls`, aleph
+  `response.resultVideoUrl/resultImageUrl`, runway `response.videoUrl`,
+  suno `sunoData[].audioUrl/imageUrl`, wav `audioWavUrl`, flux-kontext
+  `originImageUrl/resultImageUrl`, vocal separation `originUrl`; some (midi,
+  lyrics, voice) return no media at all.
+
+The extractor recognizes all of these shapes (and any key containing `url`,
+minus queue/callback metadata) and classifies each file as `image`, `video`,
+or `audio` from the key or the URL extension, so the CLI output is the same
+no matter which provider or model produced the media.
 
 Media URLs are found generically in provider results (`images[]`,
 `video.url`, `audio.url`, `resultUrls`, `resultJson`, and similar shapes), so

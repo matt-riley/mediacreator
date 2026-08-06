@@ -49,6 +49,38 @@ func (p *kieProvider) Name() string { return "kie" }
 
 func (p *kieProvider) auth() string { return "Bearer " + p.key }
 
+// NormalizeInput maps the provider-agnostic StandardInput onto kie's native
+// request schema. Market models take the canonical keys (image_url, image_urls,
+// aspect_ratio, duration, seed) inside the createTask input object, while
+// model-family endpoints (veo, runway, ...) use imageUrls and the request
+// fields directly.
+func (p *kieProvider) NormalizeInput(model string, std StandardInput) map[string]any {
+	in := map[string]any{}
+	if std.Prompt != "" {
+		in["prompt"] = std.Prompt
+	}
+	if p.useMarket(model) {
+		switch len(std.ImageURLs) {
+		case 1:
+			in["image_url"] = std.ImageURLs[0]
+		case 2, 3, 4, 5, 6, 7, 8, 9, 10:
+			in["image_urls"] = std.ImageURLs
+		}
+	} else if len(std.ImageURLs) > 0 {
+		in["imageUrls"] = std.ImageURLs
+	}
+	if std.AspectRatio != "" {
+		in["aspect_ratio"] = std.AspectRatio
+	}
+	if std.Duration != "" {
+		in["duration"] = std.Duration
+	}
+	if std.HasSeed {
+		in["seed"] = std.Seed
+	}
+	return in
+}
+
 // endpointPair describes the generate/poll endpoints of a model family.
 type endpointPair struct {
 	gen string // path to create a job
