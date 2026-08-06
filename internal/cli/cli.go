@@ -1,0 +1,576 @@
+// Package cli implements the mediacreator command line interface.
+//
+// Commands are designed to be agent friendly: results are printed as JSON on
+// stdout (one object per line), and all diagnostics go to stderr.
+package cli
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+
+	"mediacreator/internal/media"
+	"mediacreator/internal/provider"
+)
+
+const usageText = `mediacreator - generate media via fal.ai or kie.ai and save it to disk
+
+Usage:
+  mediacreator generate  --provider fal|kie --model <model> [--input <json> | --prompt <text>] --output <dir-or-file> [flags]
+  mediacreator submit    --provider fal|kie --model <model> [--input <json> | --prompt <text>] [flags]
+  mediacreator status    --provider fal|kie --request-id <id> [--model <model>] [flags]
+  mediacreator download  --provider fal|kie --request-id <id> --output <dir-or-file> [--model <model>] [flags]
+  mediacreator list      --provider fal|kie [--all|--page N] [--search <text>] [--category <cat>] [--status active|deprecated|all] [--endpoint-id <id>] [--vendor <v>] [--plain]
+  mediacreator help
+
+Commands:
+  generate   Create a job, wait for it to finish, download the media, print the result as JSON.
+  submit     Create a job and print its id as JSON. Use status/download later.
+  status     Poll a job once and print its current state as JSON.
+  download   Wait for an existing job to finish and download its media.
+  list       List the provider's available models (no API key required).
+  version    Print the build version (injected at release time).
+
+Common flags:
+  --provider string   fal | kie                       (default "fal")
+  --model string      model / endpoint id, e.g. fal-ai/flux/dev, bytedance/seedream, veo3
+  --input string      input parameters as a JSON object
+  --prompt string     shorthand for --input '{"prompt": "<text>"}'
+  --output string     destination file or directory   (default ".")
+  --webhook string    optional completion webhook URL
+  --request-id string id returned by submit (fal: request_id, kie: taskId)
+  --timeout duration  max time to wait for completion (default 10m)
+  --interval duration poll interval                  (default 5s)
+  --kie-mode string   market | model | auto           (default "auto", kie only)
+  --verbose           log progress to stderr
+
+Environment:
+  FAL_KEY      fal.ai API key (https://fal.ai/dashboard/keys)
+  KIE_API_KEY  kie.ai API key (https://kie.ai/api-key); KIE_KEY also works
+  FAL_CATALOG_URL   override fal.ai catalog base (default https://fal.ai)
+
+Output:
+  JSON on stdout, one object per line. Exit code 0 on success, 1 on error.
+
+Examples:
+  mediacreator list --provider fal --search flux --category text-to-image
+  mediacreator list --provider fal --endpoint-id fal-ai/flux/dev
+  mediacreator list --provider fal --all --plain | wc -l
+  mediacreator list --provider kie --vendor bytedance
+  mediacreator generate --provider fal --model fal-ai/flux/dev \
+      --prompt "a red fox in snow" --output ./fox.png
+  mediacreator generate --provider kie --model bytedance/seedream \
+      --prompt "flat vector poster of a campsite" --output ./out/
+  mediacreator generate --provider kie --model veo3 \
+      --prompt "a dog playing in a park" --output ./clip.mp4
+  mediacreator generate --provider fal --model fal-ai/kling-video/v1/standard/text-to-video \
+      --input '{"prompt":"waves crashing","duration":"5"}' --output ./videos
+`
+
+type options struct {
+	provider  string
+	model     string
+	input     string
+	prompt    string
+	output    string
+	webhook   string
+	requestID string
+	timeout   time.Duration
+	interval  time.Duration
+	kieMode   string
+	verbose   bool
+}
+
+// Build-time version info, injected via -ldflags (see .goreleaser.yml).
+var (
+	version = "dev"
+	commit  = "unknown"
+	date    = "unknown"
+)
+
+// Run dispatches a command and returns an error (exit code 1) on failure.
+func Run(args []string) error {
+	if len(args) == 0 {
+		fmt.Print(usageText)
+		return nil
+	}
+	cmd, rest := args[0], args[1:]
+	switch cmd {
+	case "generate":
+		return runGenerate(rest)
+	case "submit":
+		return runSubmit(rest)
+	case "status":
+		return runStatus(rest)
+	case "download":
+		return runDownload(rest)
+	case "list":
+		return runList(rest)
+	case "version", "-v", "--version":
+		fmt.Printf("mediacreator version %s (%s, %s)\n", version, commit, date)
+		return nil
+	case "help", "-h", "--help":
+		fmt.Print(usageText)
+		return nil
+	default:
+		return fmt.Errorf("unknown command %q (try \"mediacreator help\")", cmd)
+	}
+}
+
+func newFlagSet(name string) (*flag.FlagSet, *options) {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	o := &options{}
+	fs.StringVar(&o.provider, "provider", os.Getenv("MC_PROVIDER"), "fal | kie")
+	fs.StringVar(&o.model, "model", "", "model / endpoint id")
+	fs.StringVar(&o.input, "input", "", "input parameters as JSON")
+	fs.StringVar(&o.prompt, "prompt", "", "shorthand for --input {\"prompt\":...}")
+	fs.StringVar(&o.output, "output", ".", "destination file or directory")
+	fs.StringVar(&o.webhook, "webhook", "", "completion webhook URL")
+	fs.StringVar(&o.requestID, "request-id", "", "job id returned by submit")
+	fs.DurationVar(&o.timeout, "timeout", 10*time.Minute, "max wait for completion")
+	fs.DurationVar(&o.interval, "interval", 5*time.Second, "poll interval")
+	fs.StringVar(&o.kieMode, "kie-mode", "auto", "market | model | auto")
+	fs.BoolVar(&o.verbose, "verbose", false, "log progress to stderr")
+	return fs, o
+}
+
+// buildProvider constructs the configured provider, reading keys from env.
+func buildProvider(o *options) (provider.Provider, error) {
+	switch strings.ToLower(o.provider) {
+	case "", "fal":
+		return provider.NewFal(os.Getenv("FAL_KEY"))
+	case "kie":
+		return provider.NewKie(os.Getenv("KIE_API_KEY"), os.Getenv("KIE_KEY"), o.kieMode)
+	default:
+		return nil, fmt.Errorf("unknown provider %q (want fal or kie)", o.provider)
+	}
+}
+
+// buildInput merges --prompt and --input into a single parameter object.
+func buildInput(o *options) (map[string]any, error) {
+	var input map[string]any
+	if o.input != "" {
+		dec := json.NewDecoder(strings.NewReader(o.input))
+		dec.UseNumber()
+		if err := dec.Decode(&input); err != nil {
+			return nil, fmt.Errorf("invalid --input JSON: %w", err)
+		}
+		if input == nil {
+			input = map[string]any{}
+		}
+	}
+	if o.prompt != "" {
+		if input == nil {
+			input = map[string]any{}
+		}
+		input["prompt"] = o.prompt
+	}
+	if input == nil {
+		input = map[string]any{}
+	}
+	return input, nil
+}
+
+// printJSON writes v as a single JSON object line to stdout.
+func printJSON(v any) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetEscapeHTML(false)
+	return enc.Encode(v)
+}
+
+func logf(o *options, format string, a ...any) {
+	if o.verbose {
+		fmt.Fprintf(os.Stderr, format+"\n", a...)
+	}
+}
+
+// runGenerate submits a job, waits, and downloads the media.
+func runGenerate(args []string) error {
+	fs, o := newFlagSet("generate")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if o.model == "" {
+		return fmt.Errorf("--model is required")
+	}
+	p, err := buildProvider(o)
+	if err != nil {
+		return err
+	}
+	input, err := buildInput(o)
+	if err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+	job, err := p.Submit(ctx, o.model, input, o.webhook)
+	if err != nil {
+		return err
+	}
+	emitSubmit(p, o, job)
+
+	result, err := waitForCompleted(ctx, p, o, job)
+	if err != nil {
+		return err
+	}
+	return emitDone(p, o, job, result)
+}
+
+// runSubmit creates a job and returns immediately.
+func runSubmit(args []string) error {
+	fs, o := newFlagSet("submit")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if o.model == "" {
+		return fmt.Errorf("--model is required")
+	}
+	p, err := buildProvider(o)
+	if err != nil {
+		return err
+	}
+	input, err := buildInput(o)
+	if err != nil {
+		return err
+	}
+	job, err := p.Submit(context.Background(), o.model, input, o.webhook)
+	if err != nil {
+		return err
+	}
+	emitSubmit(p, o, job)
+	return nil
+}
+
+// runList prints the model catalog of a provider.
+func runList(args []string) error {
+	fs := flag.NewFlagSet("list", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var (
+		providerName string
+		page, limit  int
+		all          bool
+		search       string
+		category     string
+		status       string
+		endpointID   string
+		vendor       string
+		plain        bool
+	)
+	fs.StringVar(&providerName, "provider", os.Getenv("MC_PROVIDER"), "fal | kie")
+	fs.IntVar(&page, "page", 1, "page number (fal only)")
+	fs.IntVar(&limit, "limit", 50, "items per page (fal only)")
+	fs.BoolVar(&all, "all", false, "fetch the full catalog (fal only)")
+	fs.StringVar(&search, "search", "", "filter by free-text query (model name, description, category)")
+	fs.StringVar(&category, "category", "", "filter by category, e.g. text-to-image (fal only)")
+	fs.StringVar(&status, "status", "active", "active | deprecated | all (fal only)")
+	fs.StringVar(&endpointID, "endpoint-id", "", "fetch a specific endpoint id (find mode, fal only)")
+	fs.StringVar(&vendor, "vendor", "", "filter by vendor prefix of the model id")
+	fs.BoolVar(&plain, "plain", false, "print one model id per line instead of JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	var p provider.Provider
+	switch strings.ToLower(providerName) {
+	case "", "fal":
+		p = provider.NewFalList()
+	case "kie":
+		p = provider.NewKieList()
+	default:
+		return fmt.Errorf("unknown provider %q (want fal or kie)", providerName)
+	}
+
+	list, err := p.List(context.Background(), provider.ListOptions{
+		Page:       page,
+		Limit:      limit,
+		All:        all,
+		Search:     search,
+		Category:   category,
+		Status:     status,
+		EndpointID: endpointID,
+	})
+	if err != nil {
+		return err
+	}
+	models := filterModels(list.Models, search, category, vendor, endpointID)
+
+	if plain {
+		for _, m := range models {
+			fmt.Println(m.ID)
+		}
+		return nil
+	}
+
+	out := map[string]any{
+		"provider": p.Name(),
+		"returned": len(models),
+		"models":   models,
+	}
+	if list.Total >= 0 {
+		out["total"] = list.Total
+	}
+	if list.HasMore {
+		out["has_more"] = true
+		out["next_cursor"] = list.NextCursor
+	}
+	if list.Source != "" {
+		out["source"] = list.Source
+	}
+	return printJSON(out)
+}
+
+// filterModels applies client-side search/category/vendor/endpoint filters.
+// Providers apply some of these server-side already; the local pass is a
+// safety net (and the only filter for kie).
+func filterModels(models []provider.Model, search, category, vendor, endpointID string) []provider.Model {
+	search = strings.ToLower(strings.TrimSpace(search))
+	category = strings.ToLower(strings.TrimSpace(category))
+	vendor = strings.ToLower(strings.TrimSpace(vendor))
+	endpointID = strings.ToLower(strings.TrimSpace(endpointID))
+	if search == "" && category == "" && vendor == "" && endpointID == "" {
+		return models
+	}
+	out := make([]provider.Model, 0, len(models))
+	for _, m := range models {
+		if search != "" &&
+			!strings.Contains(strings.ToLower(m.ID), search) &&
+			!strings.Contains(strings.ToLower(m.Title), search) {
+			continue
+		}
+		if category != "" && strings.ToLower(m.Category) != category {
+			continue
+		}
+		if vendor != "" && strings.ToLower(m.Vendor) != vendor {
+			continue
+		}
+		if endpointID != "" && strings.ToLower(m.ID) != endpointID {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// runStatus polls a previously submitted job once.
+func runStatus(args []string) error {
+	fs, o := newFlagSet("status")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if o.requestID == "" {
+		return fmt.Errorf("--request-id is required")
+	}
+	p, err := buildProvider(o)
+	if err != nil {
+		return err
+	}
+	st, err := p.Status(context.Background(), &provider.Job{ID: o.requestID, Model: o.model})
+	if err != nil {
+		return err
+	}
+	return printJSON(map[string]any{
+		"provider":   p.Name(),
+		"model":      o.model,
+		"request_id": o.requestID,
+		"status":     st.Phase,
+		"detail":     st.Detail,
+		"data":       st.Raw,
+	})
+}
+
+// runDownload waits for an existing job and downloads its media.
+func runDownload(args []string) error {
+	fs, o := newFlagSet("download")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if o.requestID == "" {
+		return fmt.Errorf("--request-id is required")
+	}
+	p, err := buildProvider(o)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	job := &provider.Job{ID: o.requestID, Model: o.model}
+	if st, err := p.Status(ctx, job); err == nil && st.Phase == provider.PhasePending {
+		logf(o, "job %s is %s", o.requestID, st.Detail)
+	}
+	result, err := waitForCompleted(ctx, p, o, job)
+	if err != nil {
+		return err
+	}
+	return emitDone(p, o, job, result)
+}
+
+// waitForCompleted polls a job until it completes, fails, or times out.
+func waitForCompleted(ctx context.Context, p provider.Provider, o *options, job *provider.Job) (map[string]any, error) {
+	deadline := time.Now().Add(o.timeout)
+	ticker := time.NewTicker(o.interval)
+	defer ticker.Stop()
+
+	last := ""
+	for {
+		st, err := p.Status(ctx, job)
+		if err != nil {
+			return nil, err
+		}
+		if st.Detail != last {
+			logf(o, "job %s: %s", job.ID, st.Detail)
+			last = st.Detail
+		}
+		switch st.Phase {
+		case provider.PhaseCompleted:
+			logf(o, "job %s completed", job.ID)
+			return p.Result(ctx, job)
+		case provider.PhaseFailed:
+			return nil, fmt.Errorf("job %s failed: %s", job.ID, st.Detail)
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("timed out after %s waiting for job %s (last status: %s)", o.timeout, job.ID, st.Detail)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+// emitSubmit prints the job id line after a successful submit.
+func emitSubmit(p provider.Provider, o *options, job *provider.Job) {
+	info := map[string]any{
+		"provider":   p.Name(),
+		"model":      o.model,
+		"request_id": job.ID,
+		"status":     "submitted",
+		"status_url": job.StatusURL,
+		"result_url": job.ResultURL,
+	}
+	if o.output != "." {
+		info["output"] = o.output
+	}
+	_ = printJSON(info)
+}
+
+// emitDone downloads the media and prints the completion line.
+func emitDone(p provider.Provider, o *options, job *provider.Job, result map[string]any) error {
+	urls := media.ExtractURLs(result)
+	if len(urls) == 0 {
+		raw, _ := json.Marshal(result)
+		return fmt.Errorf("no media URLs found in the result; raw result:\n%s", raw)
+	}
+	logf(o, "found %d media file(s)", len(urls))
+
+	paths, err := planOutputs(o.output, urls)
+	if err != nil {
+		return err
+	}
+	type fileInfo struct {
+		URL  string `json:"url"`
+		Path string `json:"path"`
+		Size int64  `json:"size"`
+	}
+	files := make([]fileInfo, 0, len(urls))
+	for i, u := range urls {
+		logf(o, "downloading %s -> %s", u, paths[i])
+		size, err := media.Download(context.Background(), u, paths[i])
+		if err != nil {
+			return fmt.Errorf("downloading %s: %w", u, err)
+		}
+		files = append(files, fileInfo{URL: u, Path: paths[i], Size: size})
+	}
+
+	return printJSON(map[string]any{
+		"provider":   p.Name(),
+		"model":      o.model,
+		"request_id": job.ID,
+		"status":     "completed",
+		"media":      files,
+		"result":     result,
+	})
+}
+
+// planOutputs maps each media URL to a destination path.
+//
+//   - If output is a directory (existing, or ending in "/"), or there is more
+//     than one file, media is saved inside it using URL-derived names.
+//   - Otherwise output is treated as a single file path; a missing extension
+//     is filled in from the first URL.
+func planOutputs(output string, urls []string) ([]string, error) {
+	if output == "" {
+		output = "."
+	}
+	dirMode := strings.HasSuffix(output, "/") || isDir(output)
+	if !dirMode && len(urls) > 1 {
+		dirMode = true
+	}
+
+	if dirMode {
+		if err := os.MkdirAll(output, 0o755); err != nil {
+			return nil, err
+		}
+		used := map[string]bool{}
+		paths := make([]string, len(urls))
+		for i, u := range urls {
+			name := sanitizeName(media.Basename(u))
+			if name == "" {
+				name = fmt.Sprintf("output_%d%s", i+1, media.Ext(u))
+			}
+			name = uniqueName(used, name)
+			paths[i] = filepath.Join(output, name)
+		}
+		return paths, nil
+	}
+
+	if len(urls) == 1 {
+		if filepath.Ext(output) == "" {
+			output += media.Ext(urls[0])
+		}
+		if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
+			return nil, err
+		}
+		return []string{output}, nil
+	}
+	return nil, fmt.Errorf("internal: unexpected planOutputs state")
+}
+
+func isDir(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
+}
+
+var unsafeChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+
+func sanitizeName(name string) string {
+	name = unsafeChars.ReplaceAllString(name, "_")
+	if len(name) > 200 {
+		name = name[len(name)-200:]
+	}
+	return strings.Trim(name, "._")
+}
+
+// uniqueName returns name, deduplicating against used by inserting -2, -3, ...
+// before the extension.
+func uniqueName(used map[string]bool, name string) string {
+	if !used[name] {
+		used[name] = true
+		return name
+	}
+	ext := filepath.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	for i := 2; ; i++ {
+		candidate := fmt.Sprintf("%s-%d%s", base, i, ext)
+		if !used[candidate] {
+			used[candidate] = true
+			return candidate
+		}
+	}
+}

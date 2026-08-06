@@ -1,0 +1,42 @@
+version: 2
+
+project_name: mediacreator
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: mediacreator
+    main: .
+    binary: mediacreator
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X mediacreator/internal/cli.version={{.Version}} -X mediacreator/internal/cli.commit={{.ShortCommit}} -X mediacreator/internal/cli.date={{.Date}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+
+brews:
+  - repository:
+      owner: matt-riley
+      name: homebrew-tools
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: https://github.com/matt-riley/mediacreator
+    description: Generate media via fal.ai and kie.ai from the CLI and save it to disk

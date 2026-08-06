@@ -1,0 +1,29 @@
+[tools]
+go = "1.26.3"
+golangci-lint = "latest"
+
+[tasks.build]
+description = "Build the CLI"
+run = "go build ./..."
+
+[tasks.test]
+description = "Run tests"
+run = "go test ./..."
+
+[tasks.vet]
+description = "Run go vet"
+run = "go vet ./..."
+
+[tasks.fmt]
+description = "Check Go formatting"
+run = """
+if [ -n "$(gofmt -l .)" ]; then
+  echo "Error: Code is not formatted with gofmt"
+  gofmt -l .
+  exit 1
+fi
+"""
+
+[tasks.lint]
+description = "Run golangci-lint"
+run = "golangci-lint run --timeout=5m"
