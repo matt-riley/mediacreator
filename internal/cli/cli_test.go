@@ -232,6 +232,19 @@ func TestGenerateKieEndToEnd(t *testing.T) {
 	}
 }
 
+func TestVersionCommand(t *testing.T) {
+	// Version vars are injected at release time; the default must still exit 0
+	// (the Homebrew formula test runs `mediacreator version`).
+	outStr := captureStdout(t, func() {
+		if err := Run([]string{"version"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(outStr, "mediacreator version") {
+		t.Fatalf("version output = %q", outStr)
+	}
+}
+
 func TestStatusAndDownloadCommands(t *testing.T) {
 	falSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

@@ -5,10 +5,24 @@ A small Go CLI for generating media with [fal.ai](https://fal.ai) or
 to be agent-friendly: every command prints JSON to stdout, one object per line,
 so the output can be parsed directly by a shell, an agent, or a script.
 
-## Build
+## Install
+
+Via Homebrew (published from GitHub releases):
+
+```sh
+brew install matt-riley/tools/mediacreator
+```
+
+Or build from source:
 
 ```sh
 go build -o mediacreator .
+```
+
+The installed binary reports its build version (injected at release time):
+
+```sh
+mediacreator version
 ```
 
 ## Setup
@@ -58,6 +72,7 @@ for proxies). `MC_PROVIDER` sets a default `--provider`.
 | `status`   | Poll a previously created job once and print its state as JSON.     |
 | `download` | Wait for an existing job to finish and download its media.          |
 | `list`     | List available models for a provider (no API key needed).           |
+| `version`  | Print the build version (injected at release time).                 |
 
 ```sh
 # Split workflow for long jobs:
@@ -160,4 +175,28 @@ new models generally work without code changes.
 ```sh
 go test ./...
 go vet ./...
+golangci-lint run --timeout=5m   # or: mise run lint
+```
+
+## Releases
+
+Releases are driven by [Release Please](https://github.com/googleapis/release-please)
+and [GoReleaser](https://goreleaser.com): conventional commits on `main` open a
+release PR; merging it creates a `vX.Y.Z` tag, release, and binaries. GoReleaser
+also publishes the Homebrew formula to
+[`matt-riley/homebrew-tools`](https://github.com/matt-riley/homebrew-tools).
+
+Repository secrets required:
+
+- `HOMEBREW_TAP_GITHUB_TOKEN` — classic PAT with `repo` scope to push the
+  formula to the tap (fine-grained tokens cannot push to other repos).
+- `RELEASE_PLEASE_TOKEN` (optional) — PAT used to create the release tag and
+  trigger the publish; falls back to the default `GITHUB_TOKEN`.
+
+Local validation before pushing a release:
+
+```sh
+goreleaser check                       # validate .goreleaser.yml
+HOMEBREW_TAP_GITHUB_TOKEN=test goreleaser release --snapshot --clean
+./dist/mediacreator_*_darwin_arm64/mediacreator version
 ```
