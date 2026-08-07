@@ -61,6 +61,12 @@ The two examples below are identical apart from `--provider`/`--model`:
 ./mediacreator generate --provider kie --model bytedance/seedream \
     --prompt "the same fox, now on a skateboard" --image-url ./ref.png --output ./out/
 
+# Explicit output size — FLUX-style models take image_size presets on both providers
+./mediacreator generate --provider fal --model fal-ai/flux/dev \
+    --prompt "a poster for a jazz festival" --image-size landscape_16_9 --output ./poster.png
+./mediacreator generate --provider kie --model bytedance/seedream \
+    --prompt "a poster for a jazz festival" --image-size landscape_16_9 --output ./poster.png
+
 # Discover available models (no API key required)
 ./mediacreator list --provider fal --search flux --category text-to-image
 ./mediacreator list --provider fal --endpoint-id fal-ai/flux/dev   # find mode: details for one model
@@ -95,8 +101,10 @@ The two examples below are identical apart from `--provider`/`--model`:
 | `--model`        | Model/endpoint id (e.g. `fal-ai/flux/dev`, `bytedance/seedream`, `veo3`) | – |
 | `--prompt`       | Generation prompt — the same standard flag on every provider    | –       |
 | `--image-url`    | Reference image: URL *or local file path* (repeatable; local files are uploaded to the provider's storage first) | – |
-| `--aspect-ratio` | Aspect ratio, e.g. `16:9` (standard flag, passed through)       | –       |
-| `--duration`     | Duration in seconds, e.g. `5` (standard flag, passed through)   | –       |
+| `--aspect-ratio` | Aspect ratio, e.g. `16:9` (fal `aspect_ratio` / kie 4o `size`; **not** FLUX-family fal models — see below) | – |
+| `--image-size`   | Output size: preset (`landscape_16_9`) or `1280x720` (fal `image_size` preset/object; kie market `image_size` presets) | – |
+| `--duration`     | Duration in seconds, e.g. `5` (video models)                             | – |
+| `--num-images`   | Number of images to generate (fal `num_images`; kie 4o `nVariants`)     | – |
 | `--seed`         | Random seed (standard flag)                                     | –       |
 | `--input`        | Native input params as JSON; merged over the standard flags     | –       |
 | `--output`       | Destination file or directory                                   | `.`     |
@@ -107,11 +115,28 @@ The two examples below are identical apart from `--provider`/`--model`:
 | `--kie-mode`     | `market`, `model`, or `auto` (kie only)                         | `auto`  |
 | `--verbose`      | Print progress and raw provider payloads to stderr              | `false` |
 
-The standard flags (`--prompt`, `--image-url`, `--aspect-ratio`, `--duration`,
-`--seed`) are translated per provider — e.g. a single `--image-url` becomes
-fal's `image_url` and kie market's `image_url`, while kie family endpoints
-(veo, runway, ...) receive `imageUrls`. `--image-url` accepts either a hosted
-URL or a local file path: paths are uploaded first — fal via the CDN upload
+The standard flags (`--prompt`, `--image-url`, `--aspect-ratio`, `--image-size`,
+`--duration`, `--num-images`, `--seed`) are translated per provider **using the
+documented key conventions of each**:
+
+- **fal** — `prompt`, `image_url`/`image_urls`, `aspect_ratio` (nano-banana-style
+  models), `image_size` (FLUX-family models — preset string like
+  `landscape_16_9` or `1280x720` which becomes a `{width,height}` object),
+  `duration`, `num_images`, `seed` (per
+  [Common Model Arguments](https://fal.ai/docs/documentation/model-apis/model-arguments)).
+- **kie market** (`createTask` `input`) — `prompt`, `image_urls` (always an
+  array, per the seedream-edit and kling docs), `image_size` (seedream uses
+  fal's preset enums), `duration`, `seed`.
+- **kie families** — veo/runway: `imageUrls` + `aspect_ratio`; flux-kontext:
+  `inputImage` + `aspectRatio`; 4o image: `size` (`--aspect-ratio` maps to it)
+  + `nVariants` (`--num-images`).
+
+> ⚠️ `image_size` vs `aspect_ratio` is model-dependent: the fal docs warn that
+> FLUX-family models use `image_size` while others (e.g. Nano Banana) use
+> `aspect_ratio`, and "passing the wrong one will have no effect". Use
+> `--image-size` for FLUX-style models and `--aspect-ratio` for the rest.
+
+`--image-url` accepts either a hosted URL or a local file path: paths are uploaded first — fal via the CDN upload
 two-step flow (`POST https://rest.fal.ai/storage/upload/initiate` then `PUT`
 the presigned URL, returning a `v3b.fal.media` URL) and kie via the
 [File Stream Upload API](https://docs.kie.ai/file-upload-api/quickstart.md)

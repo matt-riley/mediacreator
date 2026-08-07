@@ -72,13 +72,45 @@ func (p *falProvider) NormalizeInput(model string, std StandardInput) map[string
 	if std.AspectRatio != "" {
 		in["aspect_ratio"] = std.AspectRatio
 	}
+	if std.ImageSize != "" {
+		in["image_size"] = imageSizeValue(std.ImageSize)
+	}
 	if std.Duration != "" {
 		in["duration"] = std.Duration
+	}
+	if std.NumImages > 0 {
+		in["num_images"] = std.NumImages
 	}
 	if std.HasSeed {
 		in["seed"] = std.Seed
 	}
 	return in
+}
+
+// imageSizeValue normalizes the --image-size flag into fal's image_size
+// schema: a preset string ("landscape_16_9") or a {"width","height"} object
+// when given as "1280x720" (both forms are documented; see
+// fal.ai/docs/documentation/model-apis/model-arguments).
+func imageSizeValue(v string) any {
+	if w, h, ok := parseDims(v); ok {
+		return map[string]any{"width": w, "height": h}
+	}
+	return v
+}
+
+// parseDims splits a "WxH" string (case-insensitive separator) into integers.
+func parseDims(v string) (int, int, bool) {
+	lower := strings.ToLower(v)
+	i := strings.IndexByte(lower, 'x')
+	if i <= 0 || i == len(lower)-1 {
+		return 0, 0, false
+	}
+	w, err1 := strconv.Atoi(lower[:i])
+	h, err2 := strconv.Atoi(lower[i+1:])
+	if err1 != nil || err2 != nil || w <= 0 || h <= 0 {
+		return 0, 0, false
+	}
+	return w, h, true
 }
 
 func (p *falProvider) Submit(ctx context.Context, model string, input map[string]any, webhook string) (*Job, error) {

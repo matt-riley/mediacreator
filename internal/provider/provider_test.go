@@ -566,7 +566,9 @@ func TestFalNormalizeInput(t *testing.T) {
 		Prompt:      "a fox",
 		ImageURLs:   []string{"https://x/ref.png"},
 		AspectRatio: "16:9",
+		ImageSize:   "landscape_16_9",
 		Duration:    "5",
+		NumImages:   2,
 		Seed:        42,
 		HasSeed:     true,
 	}
@@ -575,7 +577,9 @@ func TestFalNormalizeInput(t *testing.T) {
 		"prompt":       "a fox",
 		"image_url":    "https://x/ref.png",
 		"aspect_ratio": "16:9",
+		"image_size":   "landscape_16_9",
 		"duration":     "5",
+		"num_images":   2,
 		"seed":         int64(42),
 	}
 	if !reflect.DeepEqual(in, want) {
@@ -591,6 +595,12 @@ func TestFalNormalizeInput(t *testing.T) {
 		t.Fatal("image_url should be absent with multiple images")
 	}
 
+	// WxH image sizes become a {width, height} object (documented fal form).
+	in = p.NormalizeInput("x", StandardInput{ImageSize: "1280x720"})
+	if !reflect.DeepEqual(in["image_size"], map[string]any{"width": 1280, "height": 720}) {
+		t.Fatalf("image_size = %v", in["image_size"])
+	}
+
 	// Unset seed is omitted.
 	in = p.NormalizeInput("x", StandardInput{Prompt: "p"})
 	if _, ok := in["seed"]; ok {
@@ -602,15 +612,45 @@ func TestKieNormalizeInput(t *testing.T) {
 	p := NewKieList().(*kieProvider)
 	std := StandardInput{Prompt: "a fox", ImageURLs: []string{"https://x/ref.png"}}
 
-	// Market mode: canonical keys.
+	// Market mode: documented models (seedream-edit, kling image-to-video)
+	// take image_urls as an array, even for a single image.
 	market := p.NormalizeInput("bytedance/seedream", std)
-	if !reflect.DeepEqual(market["image_url"], "https://x/ref.png") {
-		t.Fatalf("market image_url = %v", market)
+	if !reflect.DeepEqual(market["image_urls"], []string{"https://x/ref.png"}) {
+		t.Fatalf("market image_urls = %v", market)
+	}
+	if _, ok := market["image_url"]; ok {
+		t.Fatal("market image_url should be absent; the documented key is image_urls")
 	}
 
-	// Family mode (veo): imageUrls array.
+	// Market mode passes image_size (seedream uses fal's preset enums).
+	market = p.NormalizeInput("bytedance/seedream", StandardInput{ImageSize: "square_hd"})
+	if market["image_size"] != "square_hd" {
+		t.Fatalf("market image_size = %v", market)
+	}
+
+	// Family mode (veo): imageUrls array + snake_case aspect_ratio.
 	family := p.NormalizeInput("veo3", std)
 	if !reflect.DeepEqual(family["imageUrls"], []string{"https://x/ref.png"}) {
 		t.Fatalf("family imageUrls = %v", family)
+	}
+	family = p.NormalizeInput("veo3", StandardInput{AspectRatio: "16:9"})
+	if family["aspect_ratio"] != "16:9" {
+		t.Fatalf("veo aspect_ratio = %v", family)
+	}
+
+	// flux-kontext family: single inputImage + camelCase aspectRatio.
+	flux := p.NormalizeInput("flux-kontext-pro", std)
+	if flux["inputImage"] != "https://x/ref.png" {
+		t.Fatalf("flux inputImage = %v", flux)
+	}
+	flux = p.NormalizeInput("flux-kontext-pro", StandardInput{AspectRatio: "16:9"})
+	if flux["aspectRatio"] != "16:9" {
+		t.Fatalf("flux aspectRatio = %v", flux)
+	}
+
+	// gpt4o family: size is a ratio string, nVariants an int.
+	gpt := p.NormalizeInput("gpt4o-image", StandardInput{AspectRatio: "1:1", NumImages: 3})
+	if gpt["size"] != "1:1" || gpt["nVariants"] != 3 {
+		t.Fatalf("gpt4o = %v", gpt)
 	}
 }

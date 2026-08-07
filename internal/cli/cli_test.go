@@ -686,7 +686,7 @@ func TestStandardInputAcrossProviders(t *testing.T) {
 	if err := json.Unmarshal([]byte(kieBody), &kieReq); err != nil {
 		t.Fatalf("kie body: %v", err)
 	}
-	if kieReq.Input["prompt"] != "a red fox in the snow" || kieReq.Input["image_url"] != "https://x/ref.png" {
+	if kieReq.Input["prompt"] != "a red fox in the snow" || !reflect.DeepEqual(kieReq.Input["image_urls"], []any{"https://x/ref.png"}) {
 		t.Fatalf("kie request = %v", kieReq)
 	}
 

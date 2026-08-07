@@ -51,7 +51,9 @@ type StandardInput struct {
 	Prompt      string
 	ImageURLs   []string
 	AspectRatio string
+	ImageSize   string // output dimensions: preset (landscape_16_9) or WxH (1280x720)
 	Duration    string
+	NumImages   int // 0 = unset
 	Seed        int64
 	HasSeed     bool
 }

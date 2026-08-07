@@ -50,27 +50,68 @@ func (p *kieProvider) Name() string { return "kie" }
 func (p *kieProvider) auth() string { return "Bearer " + p.key }
 
 // NormalizeInput maps the provider-agnostic StandardInput onto kie's native
-// request schema. Market models take the canonical keys (image_url, image_urls,
-// aspect_ratio, duration, seed) inside the createTask input object, while
-// model-family endpoints (veo, runway, ...) use imageUrls and the request
-// fields directly.
+// request schema, per the model-family docs:
+//
+//   - Market models (createTask input): image_urls (an array — seedream-edit
+//     and kling image-to-video both document arrays, even for one image),
+//     image_size (seedream uses fal's preset enums), duration, seed.
+//   - Family endpoints use their own conventions: veo/runway take imageUrls +
+//     aspect_ratio, flux-kontext takes inputImage + aspectRatio, and 4o image
+//     takes size (a ratio string) + nVariants.
 func (p *kieProvider) NormalizeInput(model string, std StandardInput) map[string]any {
 	in := map[string]any{}
 	if std.Prompt != "" {
 		in["prompt"] = std.Prompt
 	}
 	if p.useMarket(model) {
-		switch len(std.ImageURLs) {
-		case 1:
-			in["image_url"] = std.ImageURLs[0]
-		case 2, 3, 4, 5, 6, 7, 8, 9, 10:
+		if len(std.ImageURLs) > 0 {
 			in["image_urls"] = std.ImageURLs
 		}
-	} else if len(std.ImageURLs) > 0 {
-		in["imageUrls"] = std.ImageURLs
+		if std.AspectRatio != "" {
+			in["aspect_ratio"] = std.AspectRatio
+		}
+		if std.ImageSize != "" {
+			in["image_size"] = std.ImageSize
+		}
+		if std.Duration != "" {
+			in["duration"] = std.Duration
+		}
+		if std.HasSeed {
+			in["seed"] = std.Seed
+		}
+		return in
 	}
-	if std.AspectRatio != "" {
-		in["aspect_ratio"] = std.AspectRatio
+
+	switch familyName(model) {
+	case "flux":
+		// flux-kontext family: single reference image + camelCase aspectRatio.
+		if len(std.ImageURLs) == 1 {
+			in["inputImage"] = std.ImageURLs[0]
+		} else if len(std.ImageURLs) > 0 {
+			in["imageUrls"] = std.ImageURLs
+		}
+		if std.AspectRatio != "" {
+			in["aspectRatio"] = std.AspectRatio
+		}
+	case "gpt4o":
+		// 4o image family: size is a ratio string ("1:1"), nVariants an int.
+		if len(std.ImageURLs) > 0 {
+			in["imageUrls"] = std.ImageURLs
+		}
+		if std.AspectRatio != "" {
+			in["size"] = std.AspectRatio
+		}
+		if std.NumImages > 0 {
+			in["nVariants"] = std.NumImages
+		}
+	default:
+		// veo, runway, aleph, suno, ...: imageUrls + snake_case keys.
+		if len(std.ImageURLs) > 0 {
+			in["imageUrls"] = std.ImageURLs
+		}
+		if std.AspectRatio != "" {
+			in["aspect_ratio"] = std.AspectRatio
+		}
 	}
 	if std.Duration != "" {
 		in["duration"] = std.Duration
@@ -103,16 +144,22 @@ var kieFamilies = map[string]endpointPair{
 	"lyrics": {"/api/v1/lyrics", "/api/v1/lyrics/record-info"},
 }
 
+// familyName returns the matched family prefix for a model name, or "".
+func familyName(model string) string {
+	m := strings.ToLower(strings.TrimSpace(model))
+	for prefix := range kieFamilies {
+		if strings.HasPrefix(m, prefix) {
+			return prefix
+		}
+	}
+	return ""
+}
+
 // familyFor returns the endpoint pair for a model when its name matches a
 // known family prefix.
 func familyFor(model string) (endpointPair, bool) {
-	m := strings.ToLower(strings.TrimSpace(model))
-	for prefix, pair := range kieFamilies {
-		if strings.HasPrefix(m, prefix) {
-			return pair, true
-		}
-	}
-	return endpointPair{}, false
+	pair, ok := kieFamilies[familyName(model)]
+	return pair, ok
 }
 
 // useMarket reports whether the unified market jobs API should be used.

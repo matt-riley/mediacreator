@@ -43,8 +43,10 @@ Common flags:
   --input string      native input parameters as JSON (merged over standard flags)
   --prompt string     generation prompt — the same flag works on every provider
   --image-url string  input image URL or local file path (repeatable; local files are uploaded first)
-  --aspect-ratio str  aspect ratio, e.g. 16:9
+  --aspect-ratio str  aspect ratio, e.g. 16:9 (fal: aspect_ratio; kie family: aspectRatio/size)
+  --image-size string output image size: preset (landscape_16_9) or WxH (1280x720) (fal: image_size; kie: image_size)
   --duration string   duration in seconds, e.g. 5
+  --num-images int    number of images to generate (fal: num_images; kie 4o: nVariants)
   --seed int          random seed
   --output string     destination file or directory   (default ".")
   --webhook string    optional completion webhook URL
@@ -86,7 +88,9 @@ type options struct {
 	prompt    string
 	imageURLs []string
 	aspect    string
+	imageSize string
 	duration  string
+	numImages int
 	seed      int64
 	hasSeed   bool
 	output    string
@@ -144,7 +148,9 @@ func newFlagSet(name string) (*flag.FlagSet, *options) {
 	fs.StringVar(&o.prompt, "prompt", "", "generation prompt (standard input, any provider)")
 	fs.Var((*stringSlice)(&o.imageURLs), "image-url", "input image URL or local file path (repeatable; local files are uploaded first)")
 	fs.StringVar(&o.aspect, "aspect-ratio", "", "aspect ratio, e.g. 16:9 (standard input)")
+	fs.StringVar(&o.imageSize, "image-size", "", "output image size: preset (landscape_16_9) or WxH (1280x720)")
 	fs.StringVar(&o.duration, "duration", "", "duration in seconds, e.g. 5 (standard input)")
+	fs.IntVar(&o.numImages, "num-images", 0, "number of images to generate (standard input)")
 	fs.Int64Var(&o.seed, "seed", 0, "random seed (standard input)")
 	fs.StringVar(&o.output, "output", ".", "destination file or directory")
 	fs.StringVar(&o.webhook, "webhook", "", "completion webhook URL")
@@ -211,7 +217,9 @@ func buildNativeInput(p provider.Provider, o *options) (map[string]any, error) {
 		Prompt:      o.prompt,
 		ImageURLs:   o.imageURLs,
 		AspectRatio: o.aspect,
+		ImageSize:   o.imageSize,
 		Duration:    o.duration,
+		NumImages:   o.numImages,
 		Seed:        o.seed,
 		HasSeed:     o.hasSeed,
 	}
