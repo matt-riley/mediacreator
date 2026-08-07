@@ -111,10 +111,13 @@ The standard flags (`--prompt`, `--image-url`, `--aspect-ratio`, `--duration`,
 `--seed`) are translated per provider — e.g. a single `--image-url` becomes
 fal's `image_url` and kie market's `image_url`, while kie family endpoints
 (veo, runway, ...) receive `imageUrls`. `--image-url` accepts either a hosted
-URL or a local file path: paths are uploaded first — fal to `/storage/upload`
-(returning a `v3.fal.media` URL) and kie to `/api/v1/media/upload` — so
-reference images can come straight from disk. Use `--input` for model-specific
-parameters; it is merged over the standard flags.
+URL or a local file path: paths are uploaded first — fal via the CDN upload
+two-step flow (`POST https://rest.fal.ai/storage/upload/initiate` then `PUT`
+the presigned URL, returning a `v3b.fal.media` URL) and kie via the
+[File Stream Upload API](https://docs.kie.ai/file-upload-api/quickstart.md)
+(`POST https://kieai.redpandaai.co/api/file-stream-upload`, returning
+`data.downloadUrl`) — so reference images can come straight from disk. Use
+`--input` for model-specific parameters; it is merged over the standard flags.
 
 ### `list` flags
 

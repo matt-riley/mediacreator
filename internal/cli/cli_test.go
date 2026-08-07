@@ -130,8 +130,14 @@ func TestGenerateFalLocalReferenceImage(t *testing.T) {
 	var submitBody string
 	falSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == "POST" && r.URL.Path == "/storage/upload":
-			_ = json.NewEncoder(w).Encode(map[string]any{"url": mediaSrv.URL + "/files/ref-uploaded.png"})
+		case r.Method == http.MethodPost && r.URL.Path == "/storage/upload/initiate":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"upload_url": "http://" + r.Host + "/presigned/ref.png",
+				"file_url":   mediaSrv.URL + "/files/ref-uploaded.png",
+			})
+		case r.Method == http.MethodPut && r.URL.Path == "/presigned/ref.png":
+			_, _ = io.Copy(io.Discard, r.Body)
+			_, _ = io.WriteString(w, "ok")
 		case r.Method == "POST":
 			b, _ := io.ReadAll(r.Body)
 			submitBody = string(b)
@@ -153,7 +159,7 @@ func TestGenerateFalLocalReferenceImage(t *testing.T) {
 	defer falSrv.Close()
 	t.Setenv("FAL_KEY", "test-key")
 	t.Setenv("FAL_BASE_URL", falSrv.URL)
-	t.Setenv("FAL_UPLOAD_URL", falSrv.URL+"/storage/upload")
+	t.Setenv("FAL_UPLOAD_URL", falSrv.URL+"/storage/upload/initiate")
 
 	ref := filepath.Join(t.TempDir(), "ref.png")
 	if err := os.WriteFile(ref, []byte("fake-png"), 0o644); err != nil {
