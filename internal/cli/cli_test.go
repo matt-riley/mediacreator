@@ -403,6 +403,209 @@ func TestVersionCommand(t *testing.T) {
 	}
 }
 
+func TestRunDispatcher(t *testing.T) {
+	// version and help exit cleanly.
+	outStr := captureStdout(t, func() {
+		if err := Run([]string{"version"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(outStr, "mediacreator version") {
+		t.Fatalf("version output = %q", outStr)
+	}
+	if err := Run([]string{"help"}); err != nil {
+		t.Fatal(err)
+	}
+	// No args prints usage.
+	if err := Run(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run([]string{"bogus"}); err == nil || !strings.Contains(err.Error(), "unknown command") {
+		t.Fatalf("unknown command err = %v", err)
+	}
+}
+
+func TestSubmitCommand(t *testing.T) {
+	falSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"request_id":   "req-sub-1",
+			"response_url": "http://" + r.Host + "/m/requests/req-sub-1",
+			"status_url":   "http://" + r.Host + "/m/requests/req-sub-1/status",
+		})
+	}))
+	defer falSrv.Close()
+	t.Setenv("FAL_KEY", "test-key")
+	t.Setenv("FAL_BASE_URL", falSrv.URL)
+
+	outStr := captureStdout(t, func() {
+		if err := runSubmit([]string{
+			"--provider", "fal", "--model", "fal-ai/flux/dev",
+			"--prompt", "p", "--output", "./out", "--interval", "1s",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	line := mustJSON(t, splitLines(outStr)[0])
+	if line["status"] != "submitted" || line["request_id"] != "req-sub-1" || line["output"] != "./out" {
+		t.Fatalf("submit line = %v", line)
+	}
+
+	// Missing model is rejected before any request.
+	if err := runSubmit([]string{"--provider", "fal"}); err == nil || !strings.Contains(err.Error(), "--model is required") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestDownloadCommand(t *testing.T) {
+	mediaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("png-data"))
+	}))
+	defer mediaSrv.Close()
+
+	falSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/status"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "COMPLETED"})
+		case strings.HasSuffix(r.URL.Path, "/requests/dl-1"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"images": []any{map[string]any{"url": mediaSrv.URL + "/files/dl.png"}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer falSrv.Close()
+	t.Setenv("FAL_KEY", "test-key")
+	t.Setenv("FAL_BASE_URL", falSrv.URL)
+
+	out := filepath.Join(t.TempDir(), "dl.png")
+	outStr := captureStdout(t, func() {
+		if err := runDownload([]string{
+			"--provider", "fal", "--request-id", "dl-1", "--model", "fal-ai/flux/dev",
+			"--output", out, "--interval", "1s",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	done := mustJSON(t, splitLines(outStr)[0])
+	if done["status"] != "completed" || done["request_id"] != "dl-1" {
+		t.Fatalf("done = %v", done)
+	}
+	if fi, err := os.Stat(out); err != nil || fi.Size() != 8 {
+		t.Fatalf("output = %v (err %v)", fi, err)
+	}
+}
+
+func TestDownloadFailedJob(t *testing.T) {
+	falSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"runner crashed"}`))
+	}))
+	defer falSrv.Close()
+	t.Setenv("FAL_KEY", "test-key")
+	t.Setenv("FAL_BASE_URL", falSrv.URL)
+
+	err := runDownload([]string{
+		"--provider", "fal", "--request-id", "dl-fail", "--model", "m", "--interval", "1s",
+	})
+	if err == nil || !strings.Contains(err.Error(), "runner crashed") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestWaitForCompletedTimeout(t *testing.T) {
+	falSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"request_id":   "req-t",
+				"response_url": "http://" + r.Host + "/m/requests/req-t",
+				"status_url":   "http://" + r.Host + "/m/requests/req-t/status",
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "IN_QUEUE", "queue_position": 3})
+	}))
+	defer falSrv.Close()
+	t.Setenv("FAL_KEY", "test-key")
+	t.Setenv("FAL_BASE_URL", falSrv.URL)
+
+	var err error
+	outStr := captureStdout(t, func() {
+		err = runGenerate([]string{
+			"--provider", "fal", "--model", "m", "--prompt", "p",
+			"--timeout", "150ms", "--interval", "50ms",
+		})
+	})
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("err = %v", err)
+	}
+	// Only the submit line was emitted.
+	if lines := splitLines(outStr); len(lines) != 1 {
+		t.Fatalf("lines = %v", lines)
+	}
+}
+
+func TestWaitForCompletedFailedJob(t *testing.T) {
+	falSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "FAILED", "error": "bad model"})
+	}))
+	defer falSrv.Close()
+	t.Setenv("FAL_KEY", "test-key")
+	t.Setenv("FAL_BASE_URL", falSrv.URL)
+
+	// runGenerate's mock status endpoint returns FAILED immediately.
+	err := runGenerate([]string{
+		"--provider", "fal", "--model", "m", "--prompt", "p", "--interval", "1s",
+	})
+	if err == nil || !strings.Contains(err.Error(), "bad model") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestStatusCommandStates(t *testing.T) {
+	for _, tc := range []struct {
+		body     string
+		wantStat string
+	}{
+		{`{"status":"IN_PROGRESS"}`, "pending"},
+		{`{"status":"COMPLETED"}`, "completed"},
+		{`{"status":"FAILED","error":"x"}`, "failed"},
+	} {
+		falSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(tc.body))
+		}))
+		t.Setenv("FAL_KEY", "test-key")
+		t.Setenv("FAL_BASE_URL", falSrv.URL)
+		outStr := captureStdout(t, func() {
+			if err := runStatus([]string{"--provider", "fal", "--request-id", "r", "--model", "m"}); err != nil {
+				t.Fatal(err)
+			}
+		})
+		st := mustJSON(t, splitLines(outStr)[0])
+		if st["status"] != tc.wantStat {
+			t.Fatalf("status = %v, want %q", st, tc.wantStat)
+		}
+		falSrv.Close()
+	}
+}
+
+func TestUniqueName(t *testing.T) {
+	used := map[string]bool{}
+	if got := uniqueName(used, "a.png"); got != "a.png" {
+		t.Fatalf("first = %q", got)
+	}
+	if got := uniqueName(used, "a.png"); got != "a-2.png" {
+		t.Fatalf("second = %q", got)
+	}
+	if got := uniqueName(used, "a.png"); got != "a-3.png" {
+		t.Fatalf("third = %q", got)
+	}
+	if got := uniqueName(used, "b"); got != "b" {
+		t.Fatalf("no ext = %q", got)
+	}
+}
+
 func TestStatusAndDownloadCommands(t *testing.T) {
 	falSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
