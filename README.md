@@ -55,6 +55,12 @@ The two examples below are identical apart from `--provider`/`--model`:
 ./mediacreator generate --provider kie --model veo3 \
     --prompt "waves crashing on rocks" --output ./clips/
 
+# Reference image from a local file — uploaded to the provider's storage first
+./mediacreator generate --provider fal --model fal-ai/flux/dev \
+    --prompt "the same fox, now on a skateboard" --image-url ./ref.png --output ./out/
+./mediacreator generate --provider kie --model bytedance/seedream \
+    --prompt "the same fox, now on a skateboard" --image-url ./ref.png --output ./out/
+
 # Discover available models (no API key required)
 ./mediacreator list --provider fal --search flux --category text-to-image
 ./mediacreator list --provider fal --endpoint-id fal-ai/flux/dev   # find mode: details for one model
@@ -88,7 +94,7 @@ The two examples below are identical apart from `--provider`/`--model`:
 | `--provider`     | `fal` or `kie`                                                  | `fal`   |
 | `--model`        | Model/endpoint id (e.g. `fal-ai/flux/dev`, `bytedance/seedream`, `veo3`) | – |
 | `--prompt`       | Generation prompt — the same standard flag on every provider    | –       |
-| `--image-url`    | Input image URL (repeatable; mapped to `image_url`/`imageUrls` per provider) | – |
+| `--image-url`    | Reference image: URL *or local file path* (repeatable; local files are uploaded to the provider's storage first) | – |
 | `--aspect-ratio` | Aspect ratio, e.g. `16:9` (standard flag, passed through)       | –       |
 | `--duration`     | Duration in seconds, e.g. `5` (standard flag, passed through)   | –       |
 | `--seed`         | Random seed (standard flag)                                     | –       |
@@ -104,7 +110,10 @@ The two examples below are identical apart from `--provider`/`--model`:
 The standard flags (`--prompt`, `--image-url`, `--aspect-ratio`, `--duration`,
 `--seed`) are translated per provider — e.g. a single `--image-url` becomes
 fal's `image_url` and kie market's `image_url`, while kie family endpoints
-(veo, runway, ...) receive `imageUrls`. Use `--input` for model-specific
+(veo, runway, ...) receive `imageUrls`. `--image-url` accepts either a hosted
+URL or a local file path: paths are uploaded first — fal to `/storage/upload`
+(returning a `v3.fal.media` URL) and kie to `/api/v1/media/upload` — so
+reference images can come straight from disk. Use `--input` for model-specific
 parameters; it is merged over the standard flags.
 
 ### `list` flags

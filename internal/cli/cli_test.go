@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +12,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"mediacreator/internal/provider"
 )
 
 // captureStdout redirects os.Stdout for the duration of fn and returns what
@@ -47,6 +51,153 @@ func mustJSON(t *testing.T, s string) map[string]any {
 		t.Fatalf("invalid json %q: %v", s, err)
 	}
 	return m
+}
+
+// fakeUploadProvider is a Provider stub whose only behavior is uploading
+// local reference images via UploadImage (the other methods are never used
+// by resolveImageURLs).
+type fakeUploadProvider struct {
+	provider.Provider
+	uploads map[string]string
+}
+
+func (f *fakeUploadProvider) Name() string { return "fake" }
+
+func (f *fakeUploadProvider) UploadImage(ctx context.Context, path string) (string, error) {
+	u, ok := f.uploads[path]
+	if !ok {
+		return "", fmt.Errorf("no upload configured for %s", path)
+	}
+	return u, nil
+}
+
+// fakeListOnlyProvider is a Provider without UploadImage.
+type fakeListOnlyProvider struct{ provider.Provider }
+
+func (f *fakeListOnlyProvider) Name() string { return "list-only" }
+
+func TestResolveImageURLs(t *testing.T) {
+	ref := filepath.Join(t.TempDir(), "ref.png")
+	if err := os.WriteFile(ref, []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("urls pass through", func(t *testing.T) {
+		in := []string{"https://example.com/a.png", "http://example.com/b.jpg"}
+		out, err := resolveImageURLs(context.Background(), &fakeUploadProvider{}, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(out, in) {
+			t.Fatalf("out = %v", out)
+		}
+	})
+
+	t.Run("local file is uploaded", func(t *testing.T) {
+		p := &fakeUploadProvider{uploads: map[string]string{ref: "https://v3.fal.media/files/abc"}}
+		out, err := resolveImageURLs(context.Background(), p, []string{ref})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(out) != 1 || out[0] != "https://v3.fal.media/files/abc" {
+			t.Fatalf("out = %v", out)
+		}
+	})
+
+	t.Run("missing file errors", func(t *testing.T) {
+		_, err := resolveImageURLs(context.Background(), &fakeUploadProvider{}, []string{"/no/such.png"})
+		if err == nil || !strings.Contains(err.Error(), "no such file") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("provider without uploader errors", func(t *testing.T) {
+		p := &fakeListOnlyProvider{}
+		_, err := resolveImageURLs(context.Background(), p, []string{ref})
+		if err == nil || !strings.Contains(err.Error(), "does not support uploading") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+func TestGenerateFalLocalReferenceImage(t *testing.T) {
+	mediaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a})
+	}))
+	defer mediaSrv.Close()
+
+	var submitBody string
+	falSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/storage/upload":
+			_ = json.NewEncoder(w).Encode(map[string]any{"url": mediaSrv.URL + "/files/ref-uploaded.png"})
+		case r.Method == "POST":
+			b, _ := io.ReadAll(r.Body)
+			submitBody = string(b)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"request_id":   "req-up-1",
+				"response_url": "http://" + r.Host + "/fal-ai/flux/dev/requests/req-up-1",
+				"status_url":   "http://" + r.Host + "/fal-ai/flux/dev/requests/req-up-1/status",
+			})
+		case r.URL.Path == "/fal-ai/flux/dev/requests/req-up-1/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "COMPLETED"})
+		case r.URL.Path == "/fal-ai/flux/dev/requests/req-up-1":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"images": []any{map[string]any{"url": mediaSrv.URL + "/files/out.png"}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer falSrv.Close()
+	t.Setenv("FAL_KEY", "test-key")
+	t.Setenv("FAL_BASE_URL", falSrv.URL)
+	t.Setenv("FAL_UPLOAD_URL", falSrv.URL+"/storage/upload")
+
+	ref := filepath.Join(t.TempDir(), "ref.png")
+	if err := os.WriteFile(ref, []byte("fake-png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "out")
+
+	var err error
+	outStr := captureStdout(t, func() {
+		err = runGenerate([]string{
+			"--provider", "fal", "--model", "fal-ai/flux/dev",
+			"--prompt", "redraw this", "--image-url", ref,
+			"--output", out + "/", "--interval", "1s",
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := splitLines(outStr)
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 json lines, got %d: %s", len(lines), outStr)
+	}
+	done := mustJSON(t, lines[1])
+	if done["status"] != "completed" || done["request_id"] != "req-up-1" {
+		t.Fatalf("done line = %v", done)
+	}
+
+	// The submitted request must reference the uploaded (public) URL, not the
+	// local path.
+	var submitted map[string]any
+	if err := json.Unmarshal([]byte(submitBody), &submitted); err != nil {
+		t.Fatalf("submit body %q: %v", submitBody, err)
+	}
+	if submitted["image_url"] != mediaSrv.URL+"/files/ref-uploaded.png" {
+		t.Fatalf("image_url = %v (submit body %q)", submitted["image_url"], submitBody)
+	}
+	if submitted["prompt"] != "redraw this" {
+		t.Fatalf("prompt = %v", submitted["prompt"])
+	}
+
+	files, err := os.ReadDir(out + "/")
+	if err != nil || len(files) != 1 {
+		t.Fatalf("output dir = %v (err %v)", files, err)
+	}
 }
 
 func TestGenerateFalFileMode(t *testing.T) {

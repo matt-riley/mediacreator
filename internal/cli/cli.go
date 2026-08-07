@@ -42,7 +42,7 @@ Common flags:
   --model string      model / endpoint id, e.g. fal-ai/flux/dev, bytedance/seedream, veo3
   --input string      native input parameters as JSON (merged over standard flags)
   --prompt string     generation prompt — the same flag works on every provider
-  --image-url string  input image URL (repeatable; mapped to image_url/imageUrls per provider)
+  --image-url string  input image URL or local file path (repeatable; local files are uploaded first)
   --aspect-ratio str  aspect ratio, e.g. 16:9
   --duration string   duration in seconds, e.g. 5
   --seed int          random seed
@@ -69,6 +69,8 @@ Examples:
   mediacreator list --provider kie --vendor bytedance
   mediacreator generate --provider fal --model fal-ai/flux/dev \
       --prompt "a red fox in snow" --output ./fox.png
+  mediacreator generate --provider fal --model fal-ai/flux/dev \
+      --prompt "redraw this fox on a skateboard" --image-url ./ref.png --output ./out/
   mediacreator generate --provider kie --model bytedance/seedream \
       --prompt "flat vector poster of a campsite" --output ./out/
   mediacreator generate --provider kie --model veo3 \
@@ -140,7 +142,7 @@ func newFlagSet(name string) (*flag.FlagSet, *options) {
 	fs.StringVar(&o.model, "model", "", "model / endpoint id")
 	fs.StringVar(&o.input, "input", "", "native input parameters as JSON (merged over the standard flags)")
 	fs.StringVar(&o.prompt, "prompt", "", "generation prompt (standard input, any provider)")
-	fs.Var((*stringSlice)(&o.imageURLs), "image-url", "input image URL (repeatable; any provider)")
+	fs.Var((*stringSlice)(&o.imageURLs), "image-url", "input image URL or local file path (repeatable; local files are uploaded first)")
 	fs.StringVar(&o.aspect, "aspect-ratio", "", "aspect ratio, e.g. 16:9 (standard input)")
 	fs.StringVar(&o.duration, "duration", "", "duration in seconds, e.g. 5 (standard input)")
 	fs.Int64Var(&o.seed, "seed", 0, "random seed (standard input)")
@@ -173,6 +175,33 @@ func (s *stringSlice) String() string { return strings.Join(*s, ",") }
 func (s *stringSlice) Set(v string) error {
 	*s = append(*s, v)
 	return nil
+}
+
+// resolveImageURLs turns --image-url values into URLs. Values that are not
+// http(s) URLs are treated as local files and uploaded to the provider's
+// storage first, so reference images can come straight from disk.
+func resolveImageURLs(ctx context.Context, p provider.Provider, urls []string) ([]string, error) {
+	out := make([]string, len(urls))
+	for i, v := range urls {
+		if strings.HasPrefix(v, "http://") || strings.HasPrefix(v, "https://") {
+			out[i] = v
+			continue
+		}
+		if _, err := os.Stat(v); err != nil {
+			return nil, fmt.Errorf("--image-url %q is not a URL and no such file exists (pass an http(s) URL or a local image path)", v)
+		}
+		up, ok := p.(provider.Uploader)
+		if !ok {
+			return nil, fmt.Errorf("provider %s does not support uploading local reference images; pass an http(s) URL instead", p.Name())
+		}
+		u, err := up.UploadImage(ctx, v)
+		if err != nil {
+			return nil, fmt.Errorf("uploading reference image %q: %w", v, err)
+		}
+		logf(nil, "uploaded reference image %s -> %s", v, u)
+		out[i] = u
+	}
+	return out, nil
 }
 
 // buildNativeInput translates the standard flags into the provider's native
@@ -212,7 +241,7 @@ func printJSON(v any) error {
 }
 
 func logf(o *options, format string, a ...any) {
-	if o.verbose {
+	if o == nil || o.verbose {
 		fmt.Fprintf(os.Stderr, format+"\n", a...)
 	}
 }
@@ -231,12 +260,16 @@ func runGenerate(args []string) error {
 	if err != nil {
 		return err
 	}
+	ctx := context.Background()
+	o.imageURLs, err = resolveImageURLs(ctx, p, o.imageURLs)
+	if err != nil {
+		return err
+	}
 	input, err := buildNativeInput(p, o)
 	if err != nil {
 		return err
 	}
 
-	ctx := context.Background()
 	job, err := p.Submit(ctx, o.model, input, o.webhook)
 	if err != nil {
 		return err
@@ -264,11 +297,16 @@ func runSubmit(args []string) error {
 	if err != nil {
 		return err
 	}
+	ctx := context.Background()
+	o.imageURLs, err = resolveImageURLs(ctx, p, o.imageURLs)
+	if err != nil {
+		return err
+	}
 	input, err := buildNativeInput(p, o)
 	if err != nil {
 		return err
 	}
-	job, err := p.Submit(context.Background(), o.model, input, o.webhook)
+	job, err := p.Submit(ctx, o.model, input, o.webhook)
 	if err != nil {
 		return err
 	}
