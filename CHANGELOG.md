@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/matt-riley/mediacreator/compare/v0.2.0...v0.3.0) (2026-08-07)
+
+
+### Features
+
+* accept local reference images and upload them per provider ([940ba25](https://github.com/matt-riley/mediacreator/commit/940ba2508c8dc87cf65043c48245ec3888d0c4d0))
+
+
+### Bug Fixes
+
+* align standard input keys with documented model arguments ([89297c0](https://github.com/matt-riley/mediacreator/commit/89297c03b96e1fe5365caaa183948fcb8121f0ae))
+* use documented upload endpoints for local reference images ([1c6aa0b](https://github.com/matt-riley/mediacreator/commit/1c6aa0bf79a63d58f14e4d871b96249f8a9c2d7d))
+
 ## [0.2.0](https://github.com/matt-riley/mediacreator/compare/v0.1.0...v0.2.0) (2026-08-07)
 
 
