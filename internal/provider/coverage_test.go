@@ -203,6 +203,7 @@ func TestTruncate(t *testing.T) {
 }
 
 func TestListAuth(t *testing.T) {
+	t.Setenv("FAL_KEY", "")
 	p := NewFalList().(*falProvider)
 	if p.listAuth() != "" {
 		t.Fatal("empty key -> empty auth")
