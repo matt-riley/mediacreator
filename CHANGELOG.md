@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/matt-riley/mediacreator/compare/v0.3.0...v0.3.1) (2026-08-25)
+
+
+### Bug Fixes
+
+* **deps:** bump go toolchain to 1.26.6 for stdlib security fixes ([399515d](https://github.com/matt-riley/mediacreator/commit/399515dd4d4e097abfa422992b9916239d42def6))
+
 ## [0.3.0](https://github.com/matt-riley/mediacreator/compare/v0.2.0...v0.3.0) (2026-08-07)
 
 
