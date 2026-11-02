@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.2](https://github.com/matt-riley/mediacreator/compare/v0.3.1...v0.3.2) (2026-11-02)
+
+
+### Bug Fixes
+
+* **deps:** bump go toolchain to 1.26.10 for stdlib security fixes ([615a1f7](https://github.com/matt-riley/mediacreator/commit/615a1f7b74043145b61a91714f655959413d2fb2))
+* **provider:** pick fal reference image key from model schema ([c387a10](https://github.com/matt-riley/mediacreator/commit/c387a1064aa2d913f113094c3a0695b2be9d7755))
+
 ## [0.3.1](https://github.com/matt-riley/mediacreator/compare/v0.3.0...v0.3.1) (2026-08-25)
 
 
