@@ -119,7 +119,9 @@ The standard flags (`--prompt`, `--image-url`, `--aspect-ratio`, `--image-size`,
 `--duration`, `--num-images`, `--seed`) are translated per provider **using the
 documented key conventions of each**:
 
-- **fal** — `prompt`, `image_url`/`image_urls`, `aspect_ratio` (nano-banana-style
+- **fal** — `prompt`, `image_url`/`image_urls` (the key is picked from the model's
+  published schema, so `openai/gpt-image-2/edit` gets the array form),
+  `aspect_ratio` (nano-banana-style
   models), `image_size` (FLUX-family models — preset string like
   `landscape_16_9` or `1280x720` which becomes a `{width,height}` object),
   `duration`, `num_images`, `seed` (per

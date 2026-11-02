@@ -608,6 +608,124 @@ func TestFalNormalizeInput(t *testing.T) {
 	}
 }
 
+// openapiWithProperties builds a minimal fal catalog OpenAPI document whose
+// POST request body is a schema with the given properties.
+func openapiWithProperties(props map[string]any) map[string]any {
+	return map[string]any{
+		"components": map[string]any{"schemas": map[string]any{
+			"In": map[string]any{"type": "object", "properties": props},
+		}},
+		"paths": map[string]any{"/m": map[string]any{"post": map[string]any{
+			"requestBody": map[string]any{"content": map[string]any{
+				"application/json": map[string]any{
+					"schema": map[string]any{"$ref": "#/components/schemas/In"},
+				},
+			}},
+		}}},
+	}
+}
+
+// mockFalSchemaSubmit serves a catalog schema and captures submitted bodies.
+func mockFalSchemaSubmit(t *testing.T, props map[string]any) (*falProvider, *[]map[string]any, *atomic.Int32) {
+	t.Helper()
+	var bodies []map[string]any
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.NotFound(w, r)
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode submit body: %v", err)
+		}
+		bodies = append(bodies, body)
+		_ = json.NewEncoder(w).Encode(map[string]any{"request_id": "r1"})
+	}))
+	t.Cleanup(api.Close)
+
+	var calls atomic.Int32
+	catalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"models": []any{map[string]any{"openapi": openapiWithProperties(props)}},
+		})
+	}))
+	t.Cleanup(catalog.Close)
+
+	t.Setenv("FAL_CATALOG_URL", catalog.URL)
+	p, err := NewFal("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.(*falProvider).base = api.URL
+	return p.(*falProvider), &bodies, &calls
+}
+
+func TestFalSubmitUsesSchemaImageKey(t *testing.T) {
+	p, bodies, calls := mockFalSchemaSubmit(t, map[string]any{
+		"prompt":     map[string]any{"type": "string"},
+		"image_urls": map[string]any{"type": "array"},
+	})
+	model := "openai/gpt-image-2/edit"
+	std := StandardInput{Prompt: "p", ImageURLs: []string{"https://x/ref.png"}}
+
+	// NormalizeInput defaults to image_url; Submit must use the schema's key.
+	for i := 0; i < 2; i++ {
+		in := p.NormalizeInput(model, std)
+		if _, err := p.Submit(context.Background(), model, in, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := (*bodies)[0]
+	if !reflect.DeepEqual(got["image_urls"], []any{"https://x/ref.png"}) {
+		t.Fatalf("image_urls = %v (body %v)", got["image_urls"], got)
+	}
+	if _, ok := got["image_url"]; ok {
+		t.Fatalf("image_url should be replaced: %v", got)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("catalog calls = %d, want 1 (cached per model)", calls.Load())
+	}
+}
+
+func TestFalSubmitKeepsImageURLForStringSchema(t *testing.T) {
+	p, bodies, _ := mockFalSchemaSubmit(t, map[string]any{
+		"prompt":    map[string]any{"type": "string"},
+		"image_url": map[string]any{"type": "string"},
+	})
+	std := StandardInput{Prompt: "p", ImageURLs: []string{"https://x/ref.png"}}
+	in := p.NormalizeInput("fal-ai/flux/dev/image-to-image", std)
+	if _, err := p.Submit(context.Background(), "fal-ai/flux/dev/image-to-image", in, ""); err != nil {
+		t.Fatal(err)
+	}
+	if (*bodies)[0]["image_url"] != "https://x/ref.png" {
+		t.Fatalf("image_url = %v", (*bodies)[0])
+	}
+	if _, ok := (*bodies)[0]["image_urls"]; ok {
+		t.Fatalf("image_urls should be absent: %v", (*bodies)[0])
+	}
+}
+
+func TestFalSubmitFallsBackWhenCatalogUnavailable(t *testing.T) {
+	var body map[string]any
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_ = json.NewEncoder(w).Encode(map[string]any{"request_id": "r1"})
+	}))
+	defer api.Close()
+	t.Setenv("FAL_CATALOG_URL", "http://127.0.0.1:1")
+
+	p, _ := NewFal("k")
+	p.(*falProvider).base = api.URL
+	in := p.(*falProvider).NormalizeInput("openai/gpt-image-2/edit", StandardInput{ImageURLs: []string{"https://x/ref.png"}})
+	if _, err := p.Submit(context.Background(), "openai/gpt-image-2/edit", in, ""); err != nil {
+		t.Fatal(err)
+	}
+	if body["image_url"] != "https://x/ref.png" {
+		t.Fatalf("fallback body = %v", body)
+	}
+}
+
 func TestKieNormalizeInput(t *testing.T) {
 	p := NewKieList().(*kieProvider)
 	std := StandardInput{Prompt: "a fox", ImageURLs: []string{"https://x/ref.png"}}

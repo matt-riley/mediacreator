@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -50,14 +51,19 @@ type falProvider struct {
 	key     string
 	base    string
 	catalog string
+
+	mu      sync.Mutex
+	imgKeys map[string]string // model -> "image_url", "image_urls", or "" (unknown)
 }
 
 func (p *falProvider) Name() string { return "fal" }
 
 // NormalizeInput maps the provider-agnostic StandardInput onto fal's native
-// request schema. Single images use "image_url", multiple use "image_urls"
-// (the convention across fal image/video models); image models use "prompt"
-// while some audio models expect "text" — pass those via --input.
+// request schema. The single-image key defaults to "image_url"; Submit then
+// refines it against the model's published schema, because some models
+// (e.g. openai/gpt-image-2/edit, fal-ai/nano-banana/edit) require the
+// "image_urls" array even for one image. Image models use "prompt" while some
+// audio models expect "text" — pass those via --input.
 func (p *falProvider) NormalizeInput(model string, std StandardInput) map[string]any {
 	in := map[string]any{}
 	if std.Prompt != "" {
@@ -117,6 +123,7 @@ func (p *falProvider) Submit(ctx context.Context, model string, input map[string
 	if model == "" {
 		return nil, fmt.Errorf("provider fal requires --model (e.g. fal-ai/flux/dev)")
 	}
+	p.useSchemaImageKey(ctx, model, input)
 	u := p.base + "/" + strings.Trim(model, "/")
 	if webhook != "" {
 		u += "?fal_webhook=" + url.QueryEscape(webhook)
@@ -144,6 +151,100 @@ func (p *falProvider) Submit(ctx context.Context, model string, input map[string
 		return nil, fmt.Errorf("fal did not return a request_id; response: %v", resp)
 	}
 	return job, nil
+}
+
+// useSchemaImageKey rewrites a single string image_url into an image_urls
+// array when the model's schema declares the array. fal accepts the wrong key
+// at submit time but fails the result fetch with 422 "body.image_urls
+// required", so the key is corrected before the request is queued.
+func (p *falProvider) useSchemaImageKey(ctx context.Context, model string, input map[string]any) {
+	v, ok := input["image_url"].(string)
+	if !ok {
+		return
+	}
+	if _, ok := input["image_urls"]; ok {
+		return // --input already supplied the array form; it wins
+	}
+	if p.imageKey(ctx, model) != "image_urls" {
+		return
+	}
+	input["image_urls"] = []string{v}
+	delete(input, "image_url")
+}
+
+// imageKey reports which reference-image key the model's published schema
+// expects ("image_url" or "image_urls"), or "" when the catalog cannot say.
+// Results are cached per model; an unreachable catalog falls back to the
+// normalized key rather than failing the submission.
+func (p *falProvider) imageKey(ctx context.Context, model string) string {
+	p.mu.Lock()
+	k, ok := p.imgKeys[model]
+	p.mu.Unlock()
+	if ok {
+		return k
+	}
+
+	lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	k = p.fetchImageKey(lookupCtx, model)
+
+	p.mu.Lock()
+	if p.imgKeys == nil {
+		p.imgKeys = map[string]string{}
+	}
+	p.imgKeys[model] = k
+	p.mu.Unlock()
+	return k
+}
+
+// fetchImageKey reads the endpoint's OpenAPI schema from the catalog and
+// returns the reference-image key it declares.
+func (p *falProvider) fetchImageKey(ctx context.Context, model string) string {
+	u := p.catalog + "/v1/models?expand=openapi-3.0&endpoint_id=" + url.QueryEscape(model)
+	resp, err := doJSON(ctx, "GET", u, p.listAuth(), nil)
+	if err != nil {
+		return ""
+	}
+	models, _ := resp["models"].([]any)
+	if len(models) == 0 {
+		return ""
+	}
+	entry, _ := models[0].(map[string]any)
+	openapi, _ := entry["openapi"].(map[string]any)
+	props := inputSchemaProperties(openapi)
+	if _, ok := props["image_urls"]; ok {
+		return "image_urls"
+	}
+	if _, ok := props["image_url"]; ok {
+		return "image_url"
+	}
+	return ""
+}
+
+// inputSchemaProperties returns the properties of the schema bound to the
+// endpoint's POST request body.
+func inputSchemaProperties(openapi map[string]any) map[string]any {
+	components, _ := openapi["components"].(map[string]any)
+	schemas, _ := components["schemas"].(map[string]any)
+	paths, _ := openapi["paths"].(map[string]any)
+	for _, raw := range paths {
+		path, _ := raw.(map[string]any)
+		post, _ := path["post"].(map[string]any)
+		body, _ := post["requestBody"].(map[string]any)
+		content, _ := body["content"].(map[string]any)
+		media, _ := content["application/json"].(map[string]any)
+		schema, _ := media["schema"].(map[string]any)
+		ref, _ := schema["$ref"].(string)
+		name := strings.TrimPrefix(ref, "#/components/schemas/")
+		if name == "" {
+			continue
+		}
+		s, _ := schemas[name].(map[string]any)
+		if props, ok := s["properties"].(map[string]any); ok {
+			return props
+		}
+	}
+	return nil
 }
 
 func (p *falProvider) Status(ctx context.Context, job *Job) (*Status, error) {

@@ -159,6 +159,8 @@ func TestGenerateFalLocalReferenceImage(t *testing.T) {
 	defer falSrv.Close()
 	t.Setenv("FAL_KEY", "test-key")
 	t.Setenv("FAL_BASE_URL", falSrv.URL)
+	// The model-schema lookup is optional; keep the test off the real catalog.
+	t.Setenv("FAL_CATALOG_URL", falSrv.URL)
 	t.Setenv("FAL_UPLOAD_URL", falSrv.URL+"/storage/upload/initiate")
 
 	ref := filepath.Join(t.TempDir(), "ref.png")
@@ -849,6 +851,7 @@ func TestStandardInputAcrossProviders(t *testing.T) {
 
 	t.Setenv("FAL_KEY", "k")
 	t.Setenv("FAL_BASE_URL", falSrv.URL)
+	t.Setenv("FAL_CATALOG_URL", falSrv.URL)
 	t.Setenv("KIE_API_KEY", "k")
 	t.Setenv("KIE_BASE_URL", kieSrv.URL)
 
