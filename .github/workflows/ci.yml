@@ -16,7 +16,7 @@ jobs:
     concurrency:
       group: ${{ github.workflow }}:${{ github.ref }}:ci
       cancel-in-progress: true
-    uses: matt-riley/matt-riley-ci/.github/workflows/ci.yml@cb986078a5bd4775e5fb05348f3618e41fedf4de # v4
+    uses: matt-riley/matt-riley-ci/.github/workflows/ci.yml@002d16c00bc74ebced433f0a16187c9b13451194 # v4.2.0
     with:
       build: true
       test: true
@@ -32,28 +32,21 @@ jobs:
       cancel-in-progress: true
     needs: ci
     if: ${{ always() }}
-    uses: matt-riley/matt-riley-ci/.github/workflows/go-security.yml@cb986078a5bd4775e5fb05348f3618e41fedf4de # v4
+    uses: matt-riley/matt-riley-ci/.github/workflows/go-security.yml@002d16c00bc74ebced433f0a16187c9b13451194 # v4.2.0
 
-  coverage:
+  go-ci:
+    permissions:
+      contents: read
+    concurrency:
+      group: ${{ github.workflow }}:${{ github.ref }}:go-ci
+      cancel-in-progress: true
     needs: ci
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Run tests with coverage
-        run: |
-          go test -coverprofile=coverage.out ./...
-          go tool cover -func=coverage.out
-      - name: Enforce coverage threshold
-        run: |
-          COVERAGE=$(go tool cover -func=coverage.out | tail -1 | awk '{print $3}' | sed 's/%//')
-          THRESHOLD=60
-          echo "Total coverage: ${COVERAGE}%"
-          if (( $(echo "$COVERAGE < $THRESHOLD" | bc -l) )); then
-            echo "Coverage ${COVERAGE}% is below threshold ${THRESHOLD}%"
-            exit 1
-          fi
-          echo "Coverage threshold met."
+    uses: matt-riley/matt-riley-ci/.github/workflows/go-ci.yml@002d16c00bc74ebced433f0a16187c9b13451194 # v4.2.0
+    with:
+      # Replaces the old own `coverage` job (go test -coverprofile, 60% gate).
+      run-test: true
+      run-vet: false
+      test-args: -coverprofile=coverage.out
+      coverage-path: coverage.out
+      coverage-artifact-name: coverage
+      coverage-threshold: 60
